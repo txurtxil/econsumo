@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,37 +12,57 @@ class EConsumoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'eConsumo Sniffer',
+      title: 'eConsumo',
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), useMaterial3: true),
-      home: const SnifferScreen(),
+      home: const MainEngineScreen(),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
-class SnifferScreen extends StatefulWidget {
-  const SnifferScreen({super.key});
+class MainEngineScreen extends StatefulWidget {
+  const MainEngineScreen({super.key});
   @override
-  State<SnifferScreen> createState() => _SnifferScreenState();
+  State<MainEngineScreen> createState() => _MainEngineScreenState();
 }
 
-class _SnifferScreenState extends State<SnifferScreen> {
+class _MainEngineScreenState extends State<MainEngineScreen> {
   InAppWebViewController? _webViewController;
-  List<String> _logs = ["Esperando intercepcion de red..."];
+  bool _isLogged = false;
+  bool _isFetching = false;
+  double _currentKw = 0.0;
+  String _lastUpdate = "--:--:--";
+  String _statusMessage = "Listo para leer el contador.";
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Sniffer Avanzado - i-DE', style: TextStyle(fontSize: 16)),
+        title: Text(_isLogged ? 'Monitor Tiempo Real' : 'Login i-DE'),
         backgroundColor: const Color(0xFF007A53),
         foregroundColor: Colors.white,
+        actions: [
+          if (_isLogged)
+            IconButton(
+              icon: const Icon(Icons.logout), 
+              onPressed: () {
+                _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout')));
+                setState(() { _isLogged = false; _currentKw = 0.0; _statusMessage = "Desconectado."; });
+              }
+            )
+          else
+            TextButton.icon(
+              onPressed: () => setState(() => _isLogged = true),
+              icon: const Icon(Icons.check_circle, color: Colors.white),
+              label: const Text('¡Ya estoy dentro!', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            )
+        ]
       ),
-      body: Column(
+      body: Stack(
         children: [
-          // NAVEGADOR
-          Expanded(
-            flex: 5,
+          // 1. EL NAVEGADOR FANTASMA
+          Offstage(
+            offstage: _isLogged,
             child: InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
               initialSettings: InAppWebViewSettings(
@@ -49,90 +70,104 @@ class _SnifferScreenState extends State<SnifferScreen> {
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
               ),
-              onWebViewCreated: (controller) {
-                _webViewController = controller;
-                controller.addJavaScriptHandler(handlerName: 'apiSniffer', callback: (args) {
-                  String payload = args[0].toString();
-                  List<String> parts = payload.split('|||');
-                  if(parts.length == 2) {
-                    String url = parts[0];
-                    String json = parts[1];
-                    
-                    if(url.contains('/rest/') || url.contains('/api/')) {
-                       setState(() {
-                         // Evitamos saturar la pantalla con los latidos de sesion
-                         if (url.contains('mantenerSesion')) return; 
-                         
-                         String entry = "URL: $url\nDATOS: ${json.length > 200 ? json.substring(0, 200) + '...' : json}\n-------------------------";
-                         if (_logs[0] == "Esperando intercepcion de red...") {
-                            _logs.clear();
-                         }
-                         _logs.insert(0, entry);
-                         if (_logs.length > 15) _logs.removeLast();
-                       });
-                    }
-                  }
-                });
+              onWebViewCreated: (controller) => _webViewController = controller,
+              onLoadStop: (controller, url) {
+                if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard'))) {
+                  if (mounted) setState(() => _isLogged = true);
+                }
               },
-              onLoadStop: (controller, url) async {
-                await controller.evaluateJavascript(source: """
-                  (function() {
-                    if (window.hasSniffer) return;
-                    window.hasSniffer = true;
-                    const originalFetch = window.fetch;
-                    window.fetch = async function() {
-                        const url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0]?.url || '');
-                        const response = await originalFetch.apply(this, arguments);
-                        if(url.includes('/rest/') || url.includes('/api/')) {
-                           const clone = response.clone();
-                           clone.text().then(text => {
-                                window.flutter_inappwebview.callHandler('apiSniffer', url + "|||" + text);
-                           }).catch(e => {});
-                        }
-                        return response;
-                    };
-                    const origOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function(method, url) {
-                        this.addEventListener('load', function() {
-                            if(url.includes('/rest/') || url.includes('/api/')) {
-                                window.flutter_inappwebview.callHandler('apiSniffer', url + "|||" + this.responseText);
-                            }
-                        });
-                        origOpen.apply(this, arguments);
-                    };
-                  })();
-                """);
+              onUpdateVisitedHistory: (controller, url, androidIsReload) {
+                 if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard') || url.path.contains('medicion'))) {
+                  if (mounted) setState(() => _isLogged = true);
+                }
               }
             ),
           ),
           
-          // TERMINAL LOG
-          Expanded(
-            flex: 5,
-            child: Container(
-              color: Colors.black87,
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              child: ListView.builder(
-                itemCount: _logs.length,
-                itemBuilder: (context, index) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12.0),
-                    child: SelectableText(
-                      _logs[index], 
-                      style: TextStyle(
-                        color: _logs[index].contains('URL:') ? Colors.greenAccent : Colors.white70, 
-                        fontSize: 11, 
-                        fontFamily: 'monospace'
-                      )
+          // 2. DASHBOARD DE LECTURA NATIVA
+          if (_isLogged)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text('Potencia Demandada', style: TextStyle(fontSize: 18, color: Colors.grey)),
+                    Text('${_currentKw.toStringAsFixed(2)} kW', style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Text('Ultima actualizacion: $_lastUpdate', style: const TextStyle(color: Colors.grey)),
+                    const SizedBox(height: 20),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: _statusMessage.contains('Error') ? Colors.red.shade50 : Colors.green.shade50, borderRadius: BorderRadius.circular(8)),
+                      child: Text(_statusMessage, style: TextStyle(color: _statusMessage.contains('Error') ? Colors.red : Colors.green.shade800, fontSize: 13), textAlign: TextAlign.center),
                     ),
-                  );
-                },
+                    const Spacer(),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isFetching ? null : _fetchDataThroughWebView,
+                        icon: _isFetching ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.speed),
+                        label: Text(_isFetching ? 'Leyendo PLC (Tarda unos seg)...' : 'Solicitar Lectura al Contador'),
+                        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 20), textStyle: const TextStyle(fontSize: 16)),
+                      ),
+                    )
+                  ],
+                ),
               ),
             ),
-          )
         ],
       ),
     );
+  }
+
+  // LA MAGIA FINAL: Replicamos la secuencia exacta que descubrimos con el Sniffer
+  Future<void> _fetchDataThroughWebView() async {
+    setState(() { _isFetching = true; _statusMessage = "Despertando al contador inteligente..."; });
+    try {
+      var result = await _webViewController?.callAsyncJavaScript(functionBody: """
+        try {
+          // 1. Validar comunicacion
+          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/validarComunicacionContador/');
+          
+          // 2. Crear nuevo escenario de medicion
+          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/nuevoEscenario/');
+          
+          // Damos 3 segundos de margen fisico para que el cable PLC mande los datos al transformador
+          await new Promise(r => setTimeout(r, 3000));
+          
+          // 3. Capturar el dato real (Endpoint 24 descubierto por el sniffer)
+          let resp = await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/obtenerMedicionOnline/24');
+          
+          if (!resp.ok) { return "ERROR_HTTP_" + resp.status; }
+          return await resp.text();
+        } catch(e) {
+          return "ERROR_JS_" + e.toString();
+        }
+      """);
+
+      String jsonStr = result?.value?.toString() ?? "";
+
+      if (jsonStr.startsWith("ERROR_") || jsonStr.isEmpty) {
+         setState(() => _statusMessage = "Fallo de conexion interno: $jsonStr");
+      } else {
+         final data = jsonDecode(jsonStr);
+         if (data['valMagnitud'] != null) {
+            setState(() {
+              // Iberdrola devuelve Vatios (ej. 1990.0). Lo pasamos a kW dividiendo entre 1000
+              _currentKw = double.parse(data['valMagnitud'].toString()) / 1000.0;
+              final now = DateTime.now();
+              _lastUpdate = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
+              _statusMessage = "Lectura completada con exito.";
+            });
+         } else {
+            setState(() => _statusMessage = "Respuesta sin datos. Reintenta en unos segundos.");
+         }
+      }
+    } catch (e) {
+       setState(() => _statusMessage = "Error de motor JS: $e");
+    } finally {
+       setState(() => _isFetching = false);
+    }
   }
 }
