@@ -22,26 +22,36 @@ class EConsumoApp extends StatelessWidget {
   }
 }
 
-// --- SERVICIO DE API i-DE ---
+// --- SERVICIO DE API i-DE (V2 - Camuflaje Avanzado) ---
 class IDEApiService {
   static const String baseUrl = 'https://www.i-de.es/consumidores/rest';
   static String cookies = '';
 
+  // Cabeceras completas imitando a Chrome en Android para saltar el WAF
   static Map<String, String> get _headers => {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
     'Content-Type': 'application/json',
-    'Cookie': cookies,
+    'Origin': 'https://www.i-de.es',
+    'Referer': 'https://www.i-de.es/consumidores/rest/login',
+    'Connection': 'keep-alive',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    if (cookies.isNotEmpty) 'Cookie': cookies,
   };
 
   static void _updateCookies(http.Response response) {
     String? rawCookie = response.headers['set-cookie'];
     if (rawCookie != null) {
-      cookies = rawCookie.split(';')[0]; // Guardamos la cookie de sesión JSESSIONID
+      // i-DE suele enviar varias cookies, extraemos JSESSIONID o las unimos
+      cookies = rawCookie.split(',').map((c) => c.split(';')[0]).join('; ');
     }
   }
 
-  static Future<bool> login(String document, String password) async {
+  // Ahora devuelve un String: 'OK' si hay éxito, o el mensaje de error del servidor si falla
+  static Future<String> login(String document, String password) async {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/login'),
@@ -51,41 +61,27 @@ class IDEApiService {
       
       _updateCookies(response);
       
-      if (response.statusCode == 200 && response.body.contains('true')) {
-        return true;
+      if (response.statusCode == 200) {
+        if (response.body.contains('true') || response.body.contains('success')) {
+          return 'OK';
+        }
+        return 'Rechazado por i-DE (Cuerpo): ${response.body}';
+      } else {
+        return 'Error HTTP ${response.statusCode}: Bloqueo del servidor.\nCuerpo: ${response.body.length > 100 ? response.body.substring(0, 100) + '...' : response.body}';
       }
-      return false;
     } catch (e) {
-      throw Exception('Error de conexión al hacer login: $e');
+      return 'Excepción de red: $e';
     }
   }
 
   static Future<double> getInstantConsumption() async {
-    try {
-      // 1. Petición para despertar el contador y pedir lectura instantánea
-      final response = await http.get(
-        Uri.parse('$baseUrl/medicion/reloj/0'),
-        headers: _headers,
-      );
-      
-      if (response.statusCode != 200) {
-        throw Exception('Error del servidor i-DE: HTTP ${response.statusCode}');
-      }
-
-      // 2. Analizar el JSON devuelto
-      final data = jsonDecode(response.body);
-      
-      // La API de i-DE suele devolver la potencia en vatios o kW bajo el campo 'valMagnitud' o similar.
-      // Dependiendo de la versión de la API, la estructura varía. 
-      if (data != null && data['valMagnitud'] != null) {
-        // Asumiendo que devuelve W, convertimos a kW
-        return double.parse(data['valMagnitud'].toString()) / 1000.0;
-      } else {
-         throw Exception('Estructura JSON no esperada o contador no accesible.');
-      }
-    } catch (e) {
-      throw Exception('$e');
+    final response = await http.get(Uri.parse('$baseUrl/medicion/reloj/0'), headers: _headers);
+    if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
+    final data = jsonDecode(response.body);
+    if (data != null && data['valMagnitud'] != null) {
+      return double.parse(data['valMagnitud'].toString()) / 1000.0;
     }
+    throw Exception('JSON inválido o contador inactivo: ${response.body}');
   }
 }
 
@@ -112,8 +108,6 @@ class _AuthScreenState extends State<AuthScreen> {
   Future<void> _checkExistingSession() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getString('ide_user') != null && mounted) {
-      // Si ya hay usuario, idealmente haríamos login silencioso en background
-      // Para este prototipo, saltamos al dashboard
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
     }
   }
@@ -126,36 +120,32 @@ class _AuthScreenState extends State<AuthScreen> {
       _errorMessage = '';
     });
     
-    try {
-      bool success = await IDEApiService.login(_userController.text, _passwordController.text);
-      
-      if (success) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('ide_user', _userController.text);
-
-        if (mounted) {
-          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
-        }
-      } else {
-        setState(() => _errorMessage = 'Credenciales incorrectas o bloqueo de i-DE.');
+    String result = await IDEApiService.login(_userController.text, _passwordController.text);
+    
+    if (result == 'OK') {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('ide_user', _userController.text);
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
       }
-    } catch (e) {
-      setState(() => _errorMessage = e.toString());
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+    } else {
+      setState(() => _errorMessage = result);
     }
+    
+    if (mounted) setState(() => _isLoading = false);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              const SizedBox(height: 40),
               const Icon(Icons.bolt, size: 80, color: Color(0xFF007A53)),
               const SizedBox(height: 16),
               const Text('eConsumo', textAlign: TextAlign.center, style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Color(0xFF007A53))),
@@ -172,7 +162,11 @@ class _AuthScreenState extends State<AuthScreen> {
               ),
               if (_errorMessage.isNotEmpty) ...[
                 const SizedBox(height: 16),
-                Text(_errorMessage, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.red)),
+                  child: Text(_errorMessage, style: const TextStyle(color: Colors.red, fontSize: 12), textAlign: TextAlign.left),
+                ),
               ],
               const SizedBox(height: 32),
               ElevatedButton(
@@ -203,11 +197,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
   String _statusMessage = "";
 
   Future<void> _fetchData() async {
-    setState(() {
-      _isFetching = true;
-      _statusMessage = "Conectando con el contador...";
-    });
-    
+    setState(() { _isFetching = true; _statusMessage = "Conectando al contador..."; });
     try {
       double kw = await IDEApiService.getInstantConsumption();
       setState(() {
@@ -226,21 +216,14 @@ class _MonitorScreenState extends State<MonitorScreen> {
   Future<void> _logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
-    IDEApiService.cookies = ''; // Limpiamos sesión
-    if (mounted) {
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen()));
-    }
+    IDEApiService.cookies = '';
+    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen()));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Medidor i-DE Real'), 
-        backgroundColor: const Color(0xFF007A53), 
-        foregroundColor: Colors.white,
-        actions: [IconButton(icon: const Icon(Icons.logout), onPressed: _logout)],
-      ),
+      appBar: AppBar(title: const Text('Medidor i-DE Real'), backgroundColor: const Color(0xFF007A53), foregroundColor: Colors.white, actions: [IconButton(icon: const Icon(Icons.logout), onPressed: _logout)]),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -259,7 +242,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
                 child: ElevatedButton.icon(
                   onPressed: _isFetching ? null : _fetchData,
                   icon: _isFetching ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.speed),
-                  label: Text(_isFetching ? 'Leyendo PLC...' : 'Solicitar Lectura al Contador'),
+                  label: Text(_isFetching ? 'Leyendo PLC...' : 'Solicitar Lectura'),
                   style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 20), textStyle: const TextStyle(fontSize: 18)),
                 ),
               )
