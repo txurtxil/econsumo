@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'dart:convert';
 import 'dart:async';
 
-void main() => runApp(const EConsumoApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const EConsumoApp());
+}
 
 class EConsumoApp extends StatelessWidget {
   const EConsumoApp({super.key});
@@ -13,17 +16,13 @@ class EConsumoApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'eConsumo',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), 
-        useMaterial3: true
-      ),
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), useMaterial3: true),
       home: const BootScreen(),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
-// --- PANTALLA DE ARRANQUE ---
 class BootScreen extends StatefulWidget {
   const BootScreen({super.key});
   @override
@@ -49,11 +48,10 @@ class _BootScreenState extends State<BootScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    return const Scaffold(body: Center(child: CircularProgressIndicator(color: Color(0xFF007A53))));
   }
 }
 
-// --- PANTALLA DE AUTENTICACIÓN (Lanza el WebView) ---
 class AuthScreen extends StatelessWidget {
   const AuthScreen({super.key});
 
@@ -71,7 +69,7 @@ class AuthScreen extends StatelessWidget {
               const SizedBox(height: 16),
               const Text('eConsumo', textAlign: TextAlign.center, style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Color(0xFF007A53))),
               const SizedBox(height: 16),
-              const Text('Para evitar bloqueos de seguridad, iniciaremos sesión directamente en el portal oficial de Iberdrola.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+              const Text('Usando navegador seguro para evitar bloqueos.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
               const SizedBox(height: 48),
               ElevatedButton.icon(
                 onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const WebViewLoginScreen())),
@@ -87,7 +85,6 @@ class AuthScreen extends StatelessWidget {
   }
 }
 
-// --- EL CABALLO DE TROYA: NAVEGADOR INCRUSTADO ---
 class WebViewLoginScreen extends StatefulWidget {
   const WebViewLoginScreen({super.key});
   @override
@@ -95,60 +92,46 @@ class WebViewLoginScreen extends StatefulWidget {
 }
 
 class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
-  late final WebViewController _controller;
   bool _isLoading = true;
+  final CookieManager _cookieManager = CookieManager.instance();
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent('Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36')
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (String url) async {
-            setState(() => _isLoading = false);
-            // Si la URL cambia al "inicio" o panel de control, significa que el login tuvo éxito
-            if (url.contains('/inicio') || url.contains('/dashboard') || url.contains('/consumidores/web/')) {
-              await _extractAndSaveCookies();
-            }
-          },
-          onUrlChange: (UrlChange change) async {
-             if (change.url != null && (change.url!.contains('/inicio') || change.url!.contains('consumidores/web/inicio'))) {
-                await _extractAndSaveCookies();
-             }
-          }
-        ),
-      )
-      ..loadRequest(Uri.parse('https://www.i-de.es/consumidores/web/login'));
-  }
-
-  Future<void> _extractAndSaveCookies() async {
-    final cookieManager = WebViewCookieManager();
-    final cookies = await cookieManager.getCookies('https://www.i-de.es');
-    
-    if (cookies.isNotEmpty) {
-      String cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('ide_cookies', cookieHeader);
-      
-      if (mounted) {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
+  Future<void> _extractAndSaveCookies(WebUri url) async {
+    try {
+      List<Cookie> cookies = await _cookieManager.getCookies(url: url);
+      if (cookies.isNotEmpty) {
+        String cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('ide_cookies', cookieHeader);
+        
+        if (mounted) {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
+        }
       }
+    } catch (e) {
+      debugPrint('Error extrayendo cookies: $e');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Login Seguro i-DE'),
-        backgroundColor: const Color(0xFF007A53),
-        foregroundColor: Colors.white,
-      ),
+      appBar: AppBar(title: const Text('Login Seguro i-DE'), backgroundColor: const Color(0xFF007A53), foregroundColor: Colors.white),
       body: Stack(
         children: [
-          WebViewWidget(controller: _controller),
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
+            initialSettings: InAppWebViewSettings(
+              userAgent: 'Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
+              javaScriptEnabled: true,
+              domStorageEnabled: true,
+            ),
+            onLoadStop: (controller, url) async {
+              if (mounted) setState(() => _isLoading = false);
+              if (url != null && (url.toString().contains('/inicio') || url.toString().contains('consumidores/web/inicio'))) {
+                await _extractAndSaveCookies(url);
+              }
+            },
+          ),
           if (_isLoading) const Center(child: CircularProgressIndicator(color: Color(0xFF007A53))),
         ],
       ),
@@ -156,7 +139,6 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
   }
 }
 
-// --- MONITORIZACIÓN CON COOKIES REALES ---
 class MonitorScreen extends StatefulWidget {
   const MonitorScreen({super.key});
   @override
@@ -179,7 +161,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
       final response = await http.get(
         Uri.parse('https://www.i-de.es/consumidores/rest/medicion/reloj/0'),
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
           'Accept': 'application/json, text/plain, */*',
           'Cookie': cookies,
         }
@@ -198,10 +180,9 @@ class _MonitorScreenState extends State<MonitorScreen> {
            setState(() => _statusMessage = "Respuesta del contador vacía.");
         }
       } else {
-        // Si nos da 403 o 401 aquí, es que la sesión expiró o Akamai bloqueó el GET.
-        setState(() => _statusMessage = "Error HTTP ${response.statusCode}. La sesión puede haber expirado.");
+        setState(() => _statusMessage = "Error HTTP ${response.statusCode}. La sesión expiró.");
         if (response.statusCode == 401 || response.statusCode == 403) {
-            await prefs.remove('ide_cookies'); // Forzamos re-login en el próximo intento
+            await prefs.remove('ide_cookies'); 
         }
       }
     } catch (e) {
@@ -214,7 +195,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
   Future<void> _logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
-    await WebViewCookieManager().clearCookies();
+    await CookieManager.instance().deleteAllCookies();
     if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen()));
   }
 
