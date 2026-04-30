@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,57 +11,38 @@ class EConsumoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'eConsumo',
+      title: 'eConsumo Sniffer',
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), useMaterial3: true),
-      home: const MainEngineScreen(),
+      home: const SnifferScreen(),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
-class MainEngineScreen extends StatefulWidget {
-  const MainEngineScreen({super.key});
+class SnifferScreen extends StatefulWidget {
+  const SnifferScreen({super.key});
   @override
-  State<MainEngineScreen> createState() => _MainEngineScreenState();
+  State<SnifferScreen> createState() => _SnifferScreenState();
 }
 
-class _MainEngineScreenState extends State<MainEngineScreen> {
+class _SnifferScreenState extends State<SnifferScreen> {
   InAppWebViewController? _webViewController;
-  bool _isLogged = false;
-  bool _isFetching = false;
-  double _currentKw = 0.0;
-  String _lastUpdate = "--:--:--";
-  String _statusMessage = "Listo para leer el contador.";
+  String _sniffedUrl = "Esperando a que pulses 'Nueva medición' en la web...";
+  String _sniffedData = "...";
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isLogged ? 'Monitor Tiempo Real' : 'Login i-DE'),
+        title: const Text('eConsumo - Modo Diagnóstico', style: TextStyle(fontSize: 16)),
         backgroundColor: const Color(0xFF007A53),
         foregroundColor: Colors.white,
-        actions: [
-          if (_isLogged)
-            IconButton(
-              icon: const Icon(Icons.logout), 
-              onPressed: () {
-                _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout')));
-                setState(() { _isLogged = false; _currentKw = 0.0; });
-              }
-            )
-          else
-            TextButton.icon(
-              onPressed: () => setState(() => _isLogged = true),
-              icon: const Icon(Icons.login, color: Colors.white),
-              label: const Text('Forzar Monitor', style: TextStyle(color: Colors.white)),
-            )
-        ]
       ),
-      body: Stack(
+      body: Column(
         children: [
-          // 1. EL NAVEGADOR FANTASMA: Se oculta cuando estamos logueados pero nunca muere
-          Offstage(
-            offstage: _isLogged,
+          // MITAD SUPERIOR: Navegador Web Real
+          Expanded(
+            flex: 6,
             child: InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
               initialSettings: InAppWebViewSettings(
@@ -70,95 +50,90 @@ class _MainEngineScreenState extends State<MainEngineScreen> {
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
               ),
-              onWebViewCreated: (controller) => _webViewController = controller,
-              onLoadStop: (controller, url) {
-                // Auto-detección: si la URL incluye 'inicio' o 'dashboard', pasamos al monitor
-                if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard'))) {
-                  if (mounted) setState(() => _isLogged = true);
-                }
+              onWebViewCreated: (controller) {
+                _webViewController = controller;
+                
+                // Escuchador que recibe los datos robados por el JavaScript
+                controller.addJavaScriptHandler(handlerName: 'apiSniffer', callback: (args) {
+                  String payload = args[0].toString();
+                  List<String> parts = payload.split('|||');
+                  if(parts.length == 2) {
+                    String url = parts[0];
+                    String json = parts[1];
+                    
+                    // Filtramos solo las peticiones importantes de la API
+                    if(url.contains('/rest/') || url.contains('/api/')) {
+                       setState(() {
+                         _sniffedUrl = url;
+                         _sniffedData = json.length > 500 ? json.substring(0, 500) + '...' : json;
+                       });
+                    }
+                  }
+                });
               },
-              onUpdateVisitedHistory: (controller, url, androidIsReload) {
-                 if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard'))) {
-                  if (mounted) setState(() => _isLogged = true);
-                }
+              onLoadStop: (controller, url) async {
+                // Inyectamos el Caballo de Troya que intercepta las peticiones Fetch y XHR
+                await controller.evaluateJavascript(source: """
+                  (function() {
+                    if (window.hasSniffer) return;
+                    window.hasSniffer = true;
+
+                    const originalFetch = window.fetch;
+                    window.fetch = async function() {
+                        const url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0]?.url || '');
+                        const response = await originalFetch.apply(this, arguments);
+                        if(url.includes('/rest/') || url.includes('/api/')) {
+                           const clone = response.clone();
+                           clone.text().then(text => {
+                                window.flutter_inappwebview.callHandler('apiSniffer', url + "|||" + text);
+                           }).catch(e => {});
+                        }
+                        return response;
+                    };
+
+                    const origOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        this.addEventListener('load', function() {
+                            if(url.includes('/rest/') || url.includes('/api/')) {
+                                window.flutter_inappwebview.callHandler('apiSniffer', url + "|||" + this.responseText);
+                            }
+                        });
+                        origOpen.apply(this, arguments);
+                    };
+                  })();
+                """);
               }
             ),
           ),
           
-          // 2. DASHBOARD DE LECTURA NATIVA
-          if (_isLogged)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
+          // MITAD INFERIOR: Terminal de Interceptación
+          Expanded(
+            flex: 4,
+            child: Container(
+              color: Colors.black87,
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              child: SingleChildScrollView(
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Potencia Demandada', style: TextStyle(fontSize: 18, color: Colors.grey)),
-                    Text('${_currentKw.toStringAsFixed(2)} kW', style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    Text('Ultima actualizacion: $_lastUpdate', style: const TextStyle(color: Colors.grey)),
-                    const SizedBox(height: 20),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: _statusMessage.contains('Error') ? Colors.red.shade50 : Colors.green.shade50, borderRadius: BorderRadius.circular(8)),
-                      child: Text(_statusMessage, style: TextStyle(color: _statusMessage.contains('Error') ? Colors.red : Colors.green.shade800, fontSize: 13), textAlign: TextAlign.center),
-                    ),
-                    const Spacer(),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isFetching ? null : _fetchDataThroughWebView,
-                        icon: _isFetching ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.speed),
-                        label: Text(_isFetching ? 'Hackeando Akamai...' : 'Solicitar Lectura al Contador'),
-                        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 20), textStyle: const TextStyle(fontSize: 18)),
-                      ),
-                    )
+                    const Text("🕵️ MODO SNIFFER ACTIVADO", style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 8),
+                    const Text("1. Inicia sesión en la parte superior.", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                    const Text("2. Ve al menú 'Contador' y pulsa 'Nueva medición'.", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                    const SizedBox(height: 16),
+                    const Text("URL DETECTADA (Endpoint):", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
+                    SelectableText(_sniffedUrl, style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace')),
+                    const SizedBox(height: 12),
+                    const Text("PAYLOAD (Datos recibidos):", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
+                    SelectableText(_sniffedData, style: const TextStyle(color: Colors.greenAccent, fontSize: 11, fontFamily: 'monospace')),
                   ],
                 ),
               ),
             ),
+          )
         ],
       ),
     );
-  }
-
-  // LA MAGIA: Ejecutamos JavaScript DENTRO del navegador webview para saltarnos la seguridad
-  Future<void> _fetchDataThroughWebView() async {
-    setState(() { _isFetching = true; _statusMessage = "Solicitando datos al navegador fantasma..."; });
-    try {
-      var result = await _webViewController?.callAsyncJavaScript(functionBody: """
-        try {
-          let resp = await fetch('https://www.i-de.es/consumidores/rest/medicion/reloj/0', {
-            headers: { 'Accept': 'application/json' }
-          });
-          if (!resp.ok) { return "ERROR_HTTP_" + resp.status; }
-          return await resp.text();
-        } catch(e) {
-          return "ERROR_JS_" + e.toString();
-        }
-      """);
-
-      String jsonStr = result?.value?.toString() ?? "";
-
-      if (jsonStr.startsWith("ERROR_") || jsonStr.isEmpty) {
-         setState(() => _statusMessage = "Fallo de conexion interno: $jsonStr");
-      } else {
-         final data = jsonDecode(jsonStr);
-         if (data['valMagnitud'] != null) {
-            setState(() {
-              _currentKw = double.parse(data['valMagnitud'].toString()) / 1000.0;
-              final now = DateTime.now();
-              _lastUpdate = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
-              _statusMessage = "Lectura del contador extraida correctamente.";
-            });
-         } else {
-            setState(() => _statusMessage = "Respuesta del contador vacia. JSON: $jsonStr");
-         }
-      }
-    } catch (e) {
-       setState(() => _statusMessage = "Error de motor JS: $e");
-    } finally {
-       setState(() => _isFetching = false);
-    }
   }
 }
