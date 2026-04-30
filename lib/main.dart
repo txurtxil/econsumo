@@ -12,49 +12,63 @@ class EConsumoApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'eConsumo',
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), useMaterial3: true),
-      home: const MainEngineScreen(),
+      title: 'eConsumo V2',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF007A53)), 
+        useMaterial3: true,
+        scaffoldBackgroundColor: Colors.grey.shade100,
+      ),
+      home: const DashboardScreen(),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
-class MainEngineScreen extends StatefulWidget {
-  const MainEngineScreen({super.key});
+class DashboardScreen extends StatefulWidget {
+  const DashboardScreen({super.key});
   @override
-  State<MainEngineScreen> createState() => _MainEngineScreenState();
+  State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _MainEngineScreenState extends State<MainEngineScreen> {
+class _DashboardScreenState extends State<DashboardScreen> {
   InAppWebViewController? _webViewController;
   bool _isLogged = false;
-  bool _isFetching = false;
+  
+  // Estado del Tiempo Real
+  bool _isFetchingInstant = false;
   double _currentKw = 0.0;
   String _lastUpdate = "--:--:--";
-  String _statusMessage = "Listo para leer el contador.";
+  String _statusInstant = "Pulsa para despertar al contador.";
+
+  // Estado del Acumulado Mensual
+  bool _isFetchingMonth = false;
+  double _monthKwh = 0.0;
+  String _statusMonth = "Esperando sincronizacion...";
+
+  String _formatDate(DateTime d) => "${d.day.toString().padLeft(2, '0')}-${d.month.toString().padLeft(2, '0')}-${d.year}";
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isLogged ? 'Monitor Tiempo Real' : 'Login i-DE'),
+        title: Text(_isLogged ? 'Centro de Mando' : 'Login i-DE', style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF007A53),
         foregroundColor: Colors.white,
+        elevation: 0,
         actions: [
           if (_isLogged)
             IconButton(
               icon: const Icon(Icons.logout), 
               onPressed: () {
                 _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout')));
-                setState(() { _isLogged = false; _currentKw = 0.0; _statusMessage = "Desconectado."; });
+                setState(() { _isLogged = false; _currentKw = 0.0; _monthKwh = 0.0; });
               }
             )
           else
             TextButton.icon(
               onPressed: () => setState(() => _isLogged = true),
               icon: const Icon(Icons.check_circle, color: Colors.white),
-              label: const Text('¡Ya estoy dentro!', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              label: const Text('Forzar Inicio', style: TextStyle(color: Colors.white)),
             )
         ]
       ),
@@ -73,47 +87,108 @@ class _MainEngineScreenState extends State<MainEngineScreen> {
               onWebViewCreated: (controller) => _webViewController = controller,
               onLoadStop: (controller, url) {
                 if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard'))) {
-                  if (mounted) setState(() => _isLogged = true);
+                  _onLoginSuccess();
                 }
               },
               onUpdateVisitedHistory: (controller, url, androidIsReload) {
-                 if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard') || url.path.contains('medicion'))) {
-                  if (mounted) setState(() => _isLogged = true);
+                 if (url != null && (url.path.contains('inicio') || url.path.contains('dashboard') || url.path.contains('consumo'))) {
+                  _onLoginSuccess();
                 }
               }
             ),
           ),
           
-          // 2. DASHBOARD DE LECTURA NATIVA
+          // 2. DASHBOARD NATIVO
           if (_isLogged)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Text('Potencia Demandada', style: TextStyle(fontSize: 18, color: Colors.grey)),
-                    Text('${_currentKw.toStringAsFixed(2)} kW', style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    Text('Ultima actualizacion: $_lastUpdate', style: const TextStyle(color: Colors.grey)),
-                    const SizedBox(height: 20),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: _statusMessage.contains('Error') ? Colors.red.shade50 : Colors.green.shade50, borderRadius: BorderRadius.circular(8)),
-                      child: Text(_statusMessage, style: TextStyle(color: _statusMessage.contains('Error') ? Colors.red : Colors.green.shade800, fontSize: 13), textAlign: TextAlign.center),
-                    ),
-                    const Spacer(),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isFetching ? null : _fetchDataThroughWebView,
-                        icon: _isFetching ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.speed),
-                        label: Text(_isFetching ? 'Leyendo PLC (Tarda unos seg)...' : 'Solicitar Lectura al Contador'),
-                        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 20), textStyle: const TextStyle(fontSize: 16)),
+            RefreshIndicator(
+              onRefresh: _fetchMonthlyData,
+              color: const Color(0xFF007A53),
+              child: ListView(
+                padding: const EdgeInsets.all(16.0),
+                children: [
+                  const SizedBox(height: 8),
+                  const Text("VISION GLOBAL", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                  const SizedBox(height: 12),
+                  
+                  // TARJETA 1: CONSUMO MENSUAL
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Row(
+                                children: [
+                                  Icon(Icons.calendar_month, color: Color(0xFF007A53)),
+                                  SizedBox(width: 8),
+                                  Text("Mes Actual", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                              if (_isFetchingMonth) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          Text('${_monthKwh.toStringAsFixed(1)} kWh', style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w900, color: Colors.black87)),
+                          const SizedBox(height: 8),
+                          Text(_statusMonth, style: TextStyle(color: _statusMonth.contains('Error') ? Colors.red : Colors.grey.shade600, fontSize: 13)),
+                        ],
                       ),
-                    )
-                  ],
-                ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+                  const Text("MEDICION DIRECTA", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                  const SizedBox(height: 12),
+
+                  // TARJETA 2: TIEMPO REAL
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.bolt, color: Colors.amber, size: 28),
+                              SizedBox(width: 8),
+                              Text("Tiempo Real", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          Center(
+                            child: Text('${_currentKw.toStringAsFixed(2)} kW', style: const TextStyle(fontSize: 56, fontWeight: FontWeight.w900, color: Colors.black87)),
+                          ),
+                          const SizedBox(height: 4),
+                          Center(child: Text('Ultima lectura: $_lastUpdate', style: const TextStyle(color: Colors.grey))),
+                          const SizedBox(height: 16),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(8)),
+                            child: Text(_statusInstant, style: TextStyle(color: Colors.green.shade800, fontSize: 12), textAlign: TextAlign.center),
+                          ),
+                          const SizedBox(height: 20),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: _isFetchingInstant ? null : _fetchInstantData,
+                              icon: _isFetchingInstant ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Icon(Icons.speed),
+                              label: Text(_isFetchingInstant ? 'Leyendo PLC...' : 'Solicitar Lectura Ahora'),
+                              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007A53), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 16), textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            ),
+                          )
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
         ],
@@ -121,25 +196,26 @@ class _MainEngineScreenState extends State<MainEngineScreen> {
     );
   }
 
-  // LA MAGIA FINAL: Replicamos la secuencia exacta que descubrimos con el Sniffer
-  Future<void> _fetchDataThroughWebView() async {
-    setState(() { _isFetching = true; _statusMessage = "Despertando al contador inteligente..."; });
+  void _onLoginSuccess() {
+    if (!mounted || _isLogged) return;
+    setState(() => _isLogged = true);
+    // Disparamos la carga del historico mensual automaticamente al entrar
+    _fetchMonthlyData();
+  }
+
+  // --- OBTENCION DEL MES ACTUAL ---
+  Future<void> _fetchMonthlyData() async {
+    setState(() { _isFetchingMonth = true; _statusMonth = "Sincronizando mes..."; });
     try {
+      DateTime now = DateTime.now();
+      String startOfMonth = "01-${now.month.toString().padLeft(2, '0')}-${now.year}";
+      String today = _formatDate(now);
+
       var result = await _webViewController?.callAsyncJavaScript(functionBody: """
         try {
-          // 1. Validar comunicacion
-          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/validarComunicacionContador/');
-          
-          // 2. Crear nuevo escenario de medicion
-          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/nuevoEscenario/');
-          
-          // Damos 3 segundos de margen fisico para que el cable PLC mande los datos al transformador
-          await new Promise(r => setTimeout(r, 3000));
-          
-          // 3. Capturar el dato real (Endpoint 24 descubierto por el sniffer)
-          let resp = await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/obtenerMedicionOnline/24');
-          
-          if (!resp.ok) { return "ERROR_HTTP_" + resp.status; }
+          let url = 'https://www.i-de.es/consumidores/rest/consumoNew/obtenerDatosConsumoDH/$startOfMonth/$today/dias/USU/';
+          let resp = await fetch(url);
+          if (!resp.ok) return "ERROR_HTTP_" + resp.status;
           return await resp.text();
         } catch(e) {
           return "ERROR_JS_" + e.toString();
@@ -147,27 +223,63 @@ class _MainEngineScreenState extends State<MainEngineScreen> {
       """);
 
       String jsonStr = result?.value?.toString() ?? "";
-
       if (jsonStr.startsWith("ERROR_") || jsonStr.isEmpty) {
-         setState(() => _statusMessage = "Fallo de conexion interno: $jsonStr");
+         setState(() => _statusMonth = "Fallo de conexion: $jsonStr");
+      } else {
+         final List<dynamic> data = jsonDecode(jsonStr);
+         if (data.isNotEmpty && data[0]['total'] != null) {
+            setState(() {
+              _monthKwh = double.parse(data[0]['total'].toString()) / 1000.0;
+              _statusMonth = "Actualizado: $today";
+            });
+         } else {
+            setState(() => _statusMonth = "No hay datos de consumo en i-DE todavia.");
+         }
+      }
+    } catch (e) {
+       setState(() => _statusMonth = "Error: $e");
+    } finally {
+       if (mounted) setState(() => _isFetchingMonth = false);
+    }
+  }
+
+  // --- OBTENCION DEL TIEMPO REAL ---
+  Future<void> _fetchInstantData() async {
+    setState(() { _isFetchingInstant = true; _statusInstant = "Despertando al contador inteligente..."; });
+    try {
+      var result = await _webViewController?.callAsyncJavaScript(functionBody: """
+        try {
+          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/validarComunicacionContador/');
+          await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/nuevoEscenario/');
+          await new Promise(r => setTimeout(r, 3000));
+          let resp = await fetch('https://www.i-de.es/consumidores/rest/escenarioNew/obtenerMedicionOnline/24');
+          if (!resp.ok) return "ERROR_HTTP_" + resp.status;
+          return await resp.text();
+        } catch(e) {
+          return "ERROR_JS_" + e.toString();
+        }
+      """);
+
+      String jsonStr = result?.value?.toString() ?? "";
+      if (jsonStr.startsWith("ERROR_") || jsonStr.isEmpty) {
+         setState(() => _statusInstant = "Fallo de conexion: $jsonStr");
       } else {
          final data = jsonDecode(jsonStr);
          if (data['valMagnitud'] != null) {
             setState(() {
-              // Iberdrola devuelve Vatios (ej. 1990.0). Lo pasamos a kW dividiendo entre 1000
               _currentKw = double.parse(data['valMagnitud'].toString()) / 1000.0;
               final now = DateTime.now();
               _lastUpdate = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
-              _statusMessage = "Lectura completada con exito.";
+              _statusInstant = "Lectura del contador extraida correctamente.";
             });
          } else {
-            setState(() => _statusMessage = "Respuesta sin datos. Reintenta en unos segundos.");
+            setState(() => _statusInstant = "Respuesta sin datos. Reintenta.");
          }
       }
     } catch (e) {
-       setState(() => _statusMessage = "Error de motor JS: $e");
+       setState(() => _statusInstant = "Error: $e");
     } finally {
-       setState(() => _isFetching = false);
+       if (mounted) setState(() => _isFetchingInstant = false);
     }
   }
 }
