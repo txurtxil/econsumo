@@ -27,22 +27,21 @@ class SnifferScreen extends StatefulWidget {
 
 class _SnifferScreenState extends State<SnifferScreen> {
   InAppWebViewController? _webViewController;
-  String _sniffedUrl = "Esperando a que pulses 'Nueva medición' en la web...";
-  String _sniffedData = "...";
+  List<String> _logs = ["Esperando intercepcion de red..."];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('eConsumo - Modo Diagnóstico', style: TextStyle(fontSize: 16)),
+        title: const Text('Sniffer Avanzado - i-DE', style: TextStyle(fontSize: 16)),
         backgroundColor: const Color(0xFF007A53),
         foregroundColor: Colors.white,
       ),
       body: Column(
         children: [
-          // MITAD SUPERIOR: Navegador Web Real
+          // NAVEGADOR
           Expanded(
-            flex: 6,
+            flex: 5,
             child: InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
               initialSettings: InAppWebViewSettings(
@@ -52,8 +51,6 @@ class _SnifferScreenState extends State<SnifferScreen> {
               ),
               onWebViewCreated: (controller) {
                 _webViewController = controller;
-                
-                // Escuchador que recibe los datos robados por el JavaScript
                 controller.addJavaScriptHandler(handlerName: 'apiSniffer', callback: (args) {
                   String payload = args[0].toString();
                   List<String> parts = payload.split('|||');
@@ -61,23 +58,27 @@ class _SnifferScreenState extends State<SnifferScreen> {
                     String url = parts[0];
                     String json = parts[1];
                     
-                    // Filtramos solo las peticiones importantes de la API
                     if(url.contains('/rest/') || url.contains('/api/')) {
                        setState(() {
-                         _sniffedUrl = url;
-                         _sniffedData = json.length > 500 ? json.substring(0, 500) + '...' : json;
+                         // Evitamos saturar la pantalla con los latidos de sesion
+                         if (url.contains('mantenerSesion')) return; 
+                         
+                         String entry = "URL: $url\nDATOS: ${json.length > 200 ? json.substring(0, 200) + '...' : json}\n-------------------------";
+                         if (_logs[0] == "Esperando intercepcion de red...") {
+                            _logs.clear();
+                         }
+                         _logs.insert(0, entry);
+                         if (_logs.length > 15) _logs.removeLast();
                        });
                     }
                   }
                 });
               },
               onLoadStop: (controller, url) async {
-                // Inyectamos el Caballo de Troya que intercepta las peticiones Fetch y XHR
                 await controller.evaluateJavascript(source: """
                   (function() {
                     if (window.hasSniffer) return;
                     window.hasSniffer = true;
-
                     const originalFetch = window.fetch;
                     window.fetch = async function() {
                         const url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0]?.url || '');
@@ -90,7 +91,6 @@ class _SnifferScreenState extends State<SnifferScreen> {
                         }
                         return response;
                     };
-
                     const origOpen = XMLHttpRequest.prototype.open;
                     XMLHttpRequest.prototype.open = function(method, url) {
                         this.addEventListener('load', function() {
@@ -106,29 +106,28 @@ class _SnifferScreenState extends State<SnifferScreen> {
             ),
           ),
           
-          // MITAD INFERIOR: Terminal de Interceptación
+          // TERMINAL LOG
           Expanded(
-            flex: 4,
+            flex: 5,
             child: Container(
               color: Colors.black87,
               width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("🕵️ MODO SNIFFER ACTIVADO", style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 16)),
-                    const SizedBox(height: 8),
-                    const Text("1. Inicia sesión en la parte superior.", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                    const Text("2. Ve al menú 'Contador' y pulsa 'Nueva medición'.", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                    const SizedBox(height: 16),
-                    const Text("URL DETECTADA (Endpoint):", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
-                    SelectableText(_sniffedUrl, style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace')),
-                    const SizedBox(height: 12),
-                    const Text("PAYLOAD (Datos recibidos):", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
-                    SelectableText(_sniffedData, style: const TextStyle(color: Colors.greenAccent, fontSize: 11, fontFamily: 'monospace')),
-                  ],
-                ),
+              padding: const EdgeInsets.all(12),
+              child: ListView.builder(
+                itemCount: _logs.length,
+                itemBuilder: (context, index) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12.0),
+                    child: SelectableText(
+                      _logs[index], 
+                      style: TextStyle(
+                        color: _logs[index].contains('URL:') ? Colors.greenAccent : Colors.white70, 
+                        fontSize: 11, 
+                        fontFamily: 'monospace'
+                      )
+                    ),
+                  );
+                },
               ),
             ),
           )
