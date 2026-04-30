@@ -93,10 +93,12 @@ class WebViewLoginScreen extends StatefulWidget {
 
 class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
   bool _isLoading = true;
+  InAppWebViewController? _webViewController;
   final CookieManager _cookieManager = CookieManager.instance();
 
-  Future<void> _extractAndSaveCookies(WebUri url) async {
+  Future<void> _extractAndSaveCookies(WebUri? url) async {
     try {
+      if (url == null) return;
       List<Cookie> cookies = await _cookieManager.getCookies(url: url);
       if (cookies.isNotEmpty) {
         String cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
@@ -106,6 +108,8 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
         if (mounted) {
           Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MonitorScreen()));
         }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aún no hay sesión activa. Inicia sesión primero.')));
       }
     } catch (e) {
       debugPrint('Error extrayendo cookies: $e');
@@ -115,7 +119,23 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Login Seguro i-DE'), backgroundColor: const Color(0xFF007A53), foregroundColor: Colors.white),
+      appBar: AppBar(
+        title: const Text('Login i-DE', style: TextStyle(fontSize: 16)), 
+        backgroundColor: const Color(0xFF007A53), 
+        foregroundColor: Colors.white,
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              if (_webViewController != null) {
+                WebUri? currentUrl = await _webViewController!.getUrl();
+                await _extractAndSaveCookies(currentUrl);
+              }
+            },
+            icon: const Icon(Icons.check_circle, color: Colors.white),
+            label: const Text('¡Ya estoy dentro!', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          )
+        ],
+      ),
       body: Stack(
         children: [
           InAppWebView(
@@ -125,10 +145,20 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
               javaScriptEnabled: true,
               domStorageEnabled: true,
             ),
+            onWebViewCreated: (controller) {
+              _webViewController = controller;
+            },
             onLoadStop: (controller, url) async {
               if (mounted) setState(() => _isLoading = false);
-              if (url != null && (url.toString().contains('/inicio') || url.toString().contains('consumidores/web/inicio'))) {
+              // Auto-detección mejorada para diferentes URLs de i-DE
+              if (url != null && (url.path.contains('inicio') || url.path.contains('medicion') || url.path.contains('dashboard'))) {
                 await _extractAndSaveCookies(url);
+              }
+            },
+            onUpdateVisitedHistory: (controller, url, androidIsReload) async {
+              // Interceptar cambios de URL en SPA
+              if (url != null && (url.path.contains('inicio') || url.path.contains('medicion') || url.path.contains('dashboard'))) {
+                 await _extractAndSaveCookies(url);
               }
             },
           ),
@@ -149,7 +179,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
   double _currentKw = 0.0;
   bool _isFetching = false;
   String _lastUpdate = "Esperando lectura...";
-  String _statusMessage = "";
+  String _statusMessage = "¡Sesión capturada! Listo para leer.";
 
   Future<void> _fetchData() async {
     setState(() { _isFetching = true; _statusMessage = "Conectando al contador..."; });
@@ -177,10 +207,10 @@ class _MonitorScreenState extends State<MonitorScreen> {
             _statusMessage = "Lectura exitosa.";
           });
         } else {
-           setState(() => _statusMessage = "Respuesta del contador vacía.");
+           setState(() => _statusMessage = "Respuesta del contador vacía o formato desconocido.\n${response.body}");
         }
       } else {
-        setState(() => _statusMessage = "Error HTTP ${response.statusCode}. La sesión expiró.");
+        setState(() => _statusMessage = "Error HTTP ${response.statusCode}. La sesión expiró o fue rechazada.");
         if (response.statusCode == 401 || response.statusCode == 403) {
             await prefs.remove('ide_cookies'); 
         }
@@ -214,7 +244,14 @@ class _MonitorScreenState extends State<MonitorScreen> {
               const SizedBox(height: 10),
               Text('Última actualización: $_lastUpdate', style: const TextStyle(color: Colors.grey)),
               const SizedBox(height: 20),
-              Text(_statusMessage, style: TextStyle(color: _statusMessage.contains('Error') ? Colors.red : Colors.green), textAlign: TextAlign.center),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _statusMessage.contains('Error') || _statusMessage.contains('vacía') ? Colors.red.shade50 : Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(_statusMessage, style: TextStyle(color: _statusMessage.contains('Error') || _statusMessage.contains('vacía') ? Colors.red : Colors.green.shade800, fontSize: 13), textAlign: TextAlign.center),
+              ),
               const Spacer(),
               SizedBox(
                 width: double.infinity,
