@@ -63,10 +63,10 @@ void callbackDispatcher() {
         return Future.value(true);
     }
 
-    if (task == "fetchConsumoTask" || task == "econsumo_sync_diario") {
+    if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
         final String email = prefs.getString('email') ?? ''; final String pass = prefs.getString('pass') ?? '';
         if (email.isEmpty || pass.isEmpty) return Future.value(true);
-        HeadlessInAppWebView? headlessWebView; bool success = false;
+        HeadlessInAppWebView? headlessWebView; bool success = false; String errorMsg = '';
         headlessWebView = HeadlessInAppWebView(
           initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
           initialSettings: InAppWebViewSettings(userAgent: 'Mozilla/5.0 (Linux; Android 13)', javaScriptEnabled: true, domStorageEnabled: true),
@@ -96,13 +96,28 @@ void callbackDispatcher() {
                       await flutterLocalNotificationsPlugin.show(0, "Ciclo: ${total.toStringAsFixed(2)} €", "🔌 Modo EV Activado", const NotificationDetails(android: AndroidNotificationDetails('econsumo', 'eConsumo Alertas', importance: Importance.low, priority: Priority.low)));
                       try { const MethodChannel channel = MethodChannel('widget_channel'); await channel.invokeMethod('updateWidget', { 'fechas': '$sStart al $sEnd', 'euros': '${total.toStringAsFixed(2)} €', 'kwh': '${(p+l+v).toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': '🔌 EV Mode' }); } catch(e) {}
                       success = true; headlessWebView?.dispose();
+                    } else {
+                      errorMsg = 'Respuesta sin totalesPeriodosTarifarios';
                     }
-                } catch(e) {}
+                } catch(e) { errorMsg = 'Error parseando JSON: $e'; }
+              } else {
+                errorMsg = 'Sesión inválida (WU1) o respuesta vacía';
               }
             }
           }
         );
-        await headlessWebView.run(); await Future.delayed(const Duration(seconds: 60)); headlessWebView.dispose(); return Future.value(success);
+        await headlessWebView.run(); await Future.delayed(const Duration(seconds: 60)); headlessWebView.dispose();
+
+        if (success) {
+          await prefs.setString('last_sync_ts', DateTime.now().toIso8601String());
+          await prefs.remove('last_sync_error');
+        } else {
+          if (errorMsg.isEmpty) errorMsg = 'Timeout: no se salió del login en 60s (posible fallo de autologin o sesión)';
+          await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|$errorMsg');
+          // No esperamos al próximo ciclo de 12h: reintentamos en 20 min.
+          Workmanager().registerOneOffTask("retry_${DateTime.now().millisecondsSinceEpoch}", "retry_sync_diario", initialDelay: const Duration(minutes: 20), constraints: Constraints(networkType: NetworkType.connected));
+        }
+        return Future.value(success);
     }
     return Future.value(true);
   });
@@ -164,14 +179,40 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   final List<String> _logs = []; final ScrollController _logScrollController = ScrollController(); Timer? _rescueTimer;
   List<Map<String, String>> _chatMessages = [];
 
+  DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
+  Map<String, double> _comparadorTarifas = {};
+
   @override
   void initState() {
     super.initState();
     _email = widget.savedEmail; _pass = widget.savedPass; _groqKey = widget.savedGroq;
-    _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo();
+    _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.6.15. Día de Corte al 24 Restaurado.");
+    _addLog("eConsumo v36.8.0. Comparador de tarifas añadido.");
+
+    // Red de seguridad: mientras la app esté abierta, refrescamos cada 20 min
+    // sin depender de que el WorkManager en 2º plano haya podido ejecutarse.
+    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 20), (_) {
+      if (_isLoggedIn && mounted) { _addLog("Auto-refresco periódico (app abierta)."); _actualizarDatos(); }
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoRefreshTimer?.cancel();
+    _rescueTimer?.cancel();
+    _logScrollController.dispose();
+    _deviceCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _cargarEstadoSincronizacion() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? ts = prefs.getString('last_sync_ts');
+    final String? err = prefs.getString('last_sync_error');
+    if (!mounted) return;
+    setState(() { _lastSyncTime = ts != null ? DateTime.tryParse(ts) : null; _lastSyncError = err; });
   }
   
   void _calcularFechasCiclo() {
@@ -201,7 +242,15 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     }
   }
 
-  Future<void> _solicitarPermisosNativos() async { PermissionStatus status = await Permission.notification.status; if (!status.isGranted) await Permission.notification.request(); }
+  Future<void> _solicitarPermisosNativos() async {
+    PermissionStatus status = await Permission.notification.status;
+    if (!status.isGranted) await Permission.notification.request();
+    // Clave: sin esto, MIUI/Samsung/Huawei matan el WorkManager en 2º plano
+    // y el consumo deja de actualizarse solo. Requiere el permiso
+    // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS en AndroidManifest.xml.
+    PermissionStatus battery = await Permission.ignoreBatteryOptimizations.status;
+    if (!battery.isGranted) await Permission.ignoreBatteryOptimizations.request();
+  }
   void _addLog(String msg) { if (!mounted) return; setState(() { _logs.add("[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $msg"); if (_logs.length > 50) _logs.removeAt(0); }); Future.delayed(const Duration(milliseconds: 100), () { if (_logScrollController.hasClients) _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent); }); }
   void _copiarLog() { Clipboard.setData(ClipboardData(text: _logs.join('\n'))); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Terminal copiada'))); }
   void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.clear(); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _groqKey = ''; _isLoggedIn = false; }); _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout'))); }
@@ -275,9 +324,8 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; 
       double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; 
       
-      String textoWidget = "🔌 EV Mode Ready";
-      if (_consejoIA.isNotEmpty && !_consejoIA.contains("Analizando")) { textoWidget = "🔌 $_consejoIA"; } 
-      else if (_prediccionMeteo.isNotEmpty && !_prediccionMeteo.contains("Sincronizando") && !_prediccionMeteo.contains("disponible")) { textoWidget = "🌤️ $_prediccionMeteo"; }
+      String textoWidget = "Carga nocturna con tarifa indexada, ahorras y cuidas tu planeta.";
+      if (_consejoIA.isNotEmpty && !_consejoIA.contains("Analizando")) { textoWidget = "🔌 $_consejoIA"; }
       
       try { await const MethodChannel('widget_channel').invokeMethod('updateWidget', { 'fechas': '${_formatDateShort(_cycleStart)} al ${_formatDateShort(_fetchEnd)}', 'euros': '${totalEuros.toStringAsFixed(2)} €', 'kwh': '${_kwhTotal.toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': textoWidget }); } catch (e) {} 
   }
@@ -332,7 +380,34 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     List<Map<String,dynamic>> horasIndexed = []; for(int h = 0; h < 24; h++){ horasIndexed.add({'hora': h, 'kwh': sumByHour[h]}); } horasIndexed.sort((a,b) => b['kwh'].compareTo(a['kwh']));
     List<double> avgByHour = sumByHour.map((val) => val / diasRegistrados).toList();
     setState(() { _desgloseDiario = tempDiario; _horasPorDia = tempHorasPorDia; _topHoras = horasIndexed.take(3).toList(); _promedioPorHora = avgByHour; _costeExactoFlexi = costeFlexiTemp; });
-    _recalcularCosteEnergia(); _consultarGroqIA();
+    _recalcularCosteEnergia(); _consultarGroqIA(); _calcularComparadorTarifas();
+  }
+
+  // Comparador: con el consumo horario REAL ya descargado, calcula cuánto
+  // habría costado la energía (sin potencia/impuestos) con cada tarifa.
+  void _calcularComparadorTarifas() {
+    Map<String, double> resultado = {};
+    for (var nombreTarifa in _tarifasSimulator.keys) {
+      double total = 0.0;
+      _horasPorDia.forEach((fecha, horas) {
+        for (int h = 0; h < horas.length; h++) {
+          double precio;
+          if (nombreTarifa == 'Octopus Flexi Live') {
+            if (_preciosHistoricos.containsKey(fecha) && h < _preciosHistoricos[fecha]!.length) {
+              precio = _preciosHistoricos[fecha]![h];
+            } else {
+              if (h >= 10 && h < 14 || h >= 18 && h < 22) precio = 0.18; else if (h >= 8 && h < 10 || h >= 14 && h < 18 || h >= 22 && h <= 23) precio = 0.13; else precio = 0.08;
+            }
+          } else {
+            final precios = _tarifasSimulator[nombreTarifa]!;
+            if (h >= 10 && h < 14 || h >= 18 && h < 22) precio = precios['p']!; else if (h >= 8 && h < 10 || h >= 14 && h < 18 || h >= 22 && h <= 23) precio = precios['l']!; else precio = precios['v']!;
+          }
+          total += horas[h] * precio;
+        }
+      });
+      resultado[nombreTarifa] = total;
+    }
+    if (mounted) setState(() { _comparadorTarifas = resultado; });
   }
 
   Future<void> _descargarPrecioDia(DateTime date) async {
@@ -361,7 +436,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                       _costePotencia = ((4.4 * 0.076) + (5.7 * 0.002)) * diasCalculo; 
                       _cuotaOctopus = (0.123 + 0.019 + 0.027) * diasCalculo;
                       if (_costeExactoFlexi == 0.0) { _costeExactoFlexi = (p * 0.145) + (l * 0.098) + (v * 0.055); }
-                  }); 
+                      _lastSyncTime = DateTime.now(); _lastSyncError = null;
+                  });
+                  final prefsSync = await SharedPreferences.getInstance();
+                  await prefsSync.setString('last_sync_ts', _lastSyncTime!.toIso8601String());
+                  await prefsSync.remove('last_sync_error');
                 }
             } catch (err) { _addLog("Error JSON Días: $err"); }
         }
@@ -573,8 +652,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                 if (!_showWebFallback) ...[
                   if (_email.isEmpty) _pantallaLoginNatva() else if (!_isLoggedIn) Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const CircularProgressIndicator(color: Color(0xFF00E5FF)), const SizedBox(height: 24), Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))])) else RefreshIndicator(onRefresh: _forzarRefrescoCompleto, color: const Color(0xFF00E5FF), child: ListView(padding: const EdgeInsets.all(16), children: [ 
                     
+                    _bannerEstadoSync(), const SizedBox(height: 12),
                     _tarjetaDinero(), const SizedBox(height: 16),
                     _tarjetaDesglose(), const SizedBox(height: 16),
+                    _tarjetaComparadorTarifas(), const SizedBox(height: 16),
 
                     _tarjetaMeteoElectrica(), const SizedBox(height: 16),
                     
@@ -625,6 +706,64 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
           Container(height: 120, width: double.infinity, color: Colors.black, padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("> TERMINAL SNIFFER", style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold)), Row(children: [IconButton(icon: const Icon(Icons.copy, color: Colors.white, size: 20), onPressed: _copiarLog), if (_email.isNotEmpty) ElevatedButton(onPressed: () => setState(() => _showWebFallback = !_showWebFallback), style: ElevatedButton.styleFrom(backgroundColor: Colors.red, minimumSize: const Size(60, 25)), child: Text(_showWebFallback ? "OCULTAR WEB" : "VER WEB", style: const TextStyle(fontSize: 9, color: Colors.white)))])]), Expanded(child: ListView.builder(controller: _logScrollController, itemCount: _logs.length, itemBuilder: (c, i) => Text(_logs[i], style: TextStyle(color: _logs[i].contains("Error") || _logs[i].contains("Fallo") || _logs[i].contains("WU1") ? Colors.redAccent : Colors.white70, fontSize: 10, fontFamily: 'monospace'))))]))
         ],
       ),
+    );
+  }
+
+  Widget _bannerEstadoSync() {
+    if (_lastSyncTime == null && _lastSyncError == null) return const SizedBox.shrink();
+    Duration? diff = _lastSyncTime != null ? DateTime.now().difference(_lastSyncTime!) : null;
+    bool stale = diff == null || diff.inHours >= 13;
+    String texto;
+    if (_lastSyncTime == null) {
+      texto = "Sin sincronización automática registrada todavía.";
+    } else if (diff!.inMinutes < 60) {
+      texto = "Última actualización automática: hace ${diff.inMinutes} min.";
+    } else {
+      texto = "Última actualización automática: hace ${diff.inHours} h.";
+    }
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: stale ? Colors.red.shade50 : Colors.green.shade50, borderRadius: BorderRadius.circular(12), border: Border.all(color: stale ? Colors.red.shade200 : Colors.green.shade200)),
+      child: Row(children: [
+        Icon(stale ? Icons.warning_amber_rounded : Icons.check_circle, color: stale ? Colors.red : Colors.green, size: 18),
+        const SizedBox(width: 8),
+        Expanded(child: Text(texto, style: TextStyle(fontSize: 11, color: stale ? Colors.red.shade900 : Colors.green.shade900, fontWeight: FontWeight.bold))),
+        if (_lastSyncError != null) IconButton(
+          icon: const Icon(Icons.info_outline, size: 18, color: Colors.redAccent),
+          tooltip: "Ver motivo del último fallo",
+          onPressed: () {
+            final parts = _lastSyncError!.split('|');
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(parts.length > 1 ? parts[1] : _lastSyncError!), duration: const Duration(seconds: 6)));
+          },
+        )
+      ]),
+    );
+  }
+
+  Widget _tarjetaComparadorTarifas() {
+    if (_comparadorTarifas.isEmpty) return const SizedBox.shrink();
+    var entradas = _comparadorTarifas.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+    double masBarata = entradas.first.value;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: const [Icon(Icons.compare_arrows, size: 16, color: Colors.blueGrey), SizedBox(width: 8), Text("COMPARADOR DE TARIFAS (ESTE CICLO)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12))]),
+        const Divider(),
+        for (var e in entradas) Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Row(children: [
+              if (e.value == masBarata) const Padding(padding: EdgeInsets.only(right: 6), child: Icon(Icons.emoji_events, size: 16, color: Colors.amber)),
+              Text(e.key, style: TextStyle(fontWeight: e.key == _tarifaSeleccionada ? FontWeight.bold : FontWeight.normal, color: e.key == _tarifaSeleccionada ? Colors.indigo : Colors.black87)),
+              if (e.key == _tarifaSeleccionada) const Padding(padding: EdgeInsets.only(left: 6), child: Text("(actual)", style: TextStyle(fontSize: 10, color: Colors.grey))),
+            ]),
+            Text("${e.value.toStringAsFixed(2)} €", style: TextStyle(fontWeight: FontWeight.bold, color: e.value == masBarata ? Colors.green.shade700 : Colors.black87)),
+          ]),
+        ),
+        const SizedBox(height: 4),
+        const Text("Solo energía (sin potencia fija ni impuestos), calculado con tu consumo horario real.", style: TextStyle(fontSize: 10, color: Colors.grey, fontStyle: FontStyle.italic)),
+      ]),
     );
   }
 

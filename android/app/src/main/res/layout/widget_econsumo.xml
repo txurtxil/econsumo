@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@drawable/widget_background"
-    android:padding="14dp">
+    android:padding="10dp">
 
     <TextView
         android:id="@+id/widget_titulo"
@@ -12,56 +12,51 @@
         android:layout_height="wrap_content"
         android:text="eConsumo IA"
         android:textColor="#00E5FF"
-        android:textSize="13sp"
+        android:textSize="11sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/widget_fechas"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
         android:text="Ciclo"
         android:textColor="#B0BEC5"
-        android:textSize="11sp" />
+        android:textSize="9sp" />
 
     <TextView
         android:id="@+id/widget_euros"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
         android:text="-- €"
         android:textColor="#FFFFFF"
-        android:textSize="30sp"
+        android:textSize="20sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/widget_kwh"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
         android:text="-- kWh"
         android:textColor="#FFFFFF"
-        android:textSize="12sp" />
+        android:textSize="10sp" />
 
     <TextView
         android:id="@+id/widget_prediccion"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
         android:text=""
         android:textColor="#CFD8DC"
-        android:textSize="11sp" />
+        android:textSize="9sp" />
 
     <TextView
         android:id="@+id/widget_consejo"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
         android:text="🔌 eConsumo"
         android:textColor="#80DEEA"
-        android:textSize="11sp"
+        android:textSize="9sp"
         android:textStyle="italic"
-        android:maxLines="3"
+        android:maxLines="2"
         android:ellipsize="end" />
 
 </LinearLayout>
