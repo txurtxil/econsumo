@@ -24,6 +24,7 @@ class MainActivity : FlutterActivity() {
                     .putString("kwh", args?.get("kwh") as? String ?: "")
                     .putString("prediccion", args?.get("prediccion") as? String ?: "")
                     .putString("consejo", args?.get("consejo") as? String ?: "")
+                    .putString("grafica", args?.get("grafica") as? String ?: "")
                     .apply()
 
                 val manager = AppWidgetManager.getInstance(applicationContext)

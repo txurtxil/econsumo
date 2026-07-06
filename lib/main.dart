@@ -326,8 +326,16 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       
       String textoWidget = "Carga nocturna con tarifa indexada, ahorras y cuidas tu planeta.";
       if (_consejoIA.isNotEmpty && !_consejoIA.contains("Analizando")) { textoWidget = "🔌 $_consejoIA"; }
-      
-      try { await const MethodChannel('widget_channel').invokeMethod('updateWidget', { 'fechas': '${_formatDateShort(_cycleStart)} al ${_formatDateShort(_fetchEnd)}', 'euros': '${totalEuros.toStringAsFixed(2)} €', 'kwh': '${_kwhTotal.toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': textoWidget }); } catch (e) {} 
+
+      // Últimos 7 días reales (no futuros) para la gráfica del widget: "dd/MM|kwh;dd/MM|kwh;..."
+      String grafica = '';
+      try {
+        final reales = _desgloseDiario.where((d) => d['isFuture'] == false).toList();
+        final ultimos = reales.length > 7 ? reales.sublist(reales.length - 7) : reales;
+        grafica = ultimos.map((d) => "${d['fecha']}|${(d['kwh'] as double).toStringAsFixed(2)}").join(";");
+      } catch (e) { grafica = ''; }
+
+      try { await const MethodChannel('widget_channel').invokeMethod('updateWidget', { 'fechas': '${_formatDateShort(_cycleStart)} al ${_formatDateShort(_fetchEnd)}', 'euros': '${totalEuros.toStringAsFixed(2)} €', 'kwh': '${_kwhTotal.toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': textoWidget, 'grafica': grafica }); } catch (e) {} 
   }
 
   void _comprobarAccesoExitoso(String path) { 
