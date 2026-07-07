@@ -180,6 +180,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   List<Map<String, String>> _chatMessages = [];
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
+  bool _conectando = false;
   Map<String, double> _comparadorTarifas = {};
 
   @override
@@ -189,13 +190,36 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.8.0. Comparador de tarifas añadido.");
+    _addLog("eConsumo v36.9.5. Conexión manual a i-DE.");
+    // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
+    // El usuario decide cuándo conectar (botón o tirar para refrescar).
+    // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
+  }
 
-    // Red de seguridad: mientras la app esté abierta, refrescamos cada 20 min
-    // sin depender de que el WorkManager en 2º plano haya podido ejecutarse.
-    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 20), (_) {
-      if (_isLoggedIn && mounted) { _addLog("Auto-refresco periódico (app abierta)."); _actualizarDatos(); }
-    });
+  Future<void> _conectarAhora() async {
+    if (_conectando || _isLoggedIn) return;
+    setState(() { _conectando = true; _status = "Conectando con i-DE..."; });
+    _addLog("Conexión manual iniciada por el usuario.");
+    await _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')));
+  }
+
+  Widget _pantallaConectar() {
+    return Center(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      const Icon(Icons.power_settings_new, size: 64, color: Color(0xFF00E5FF)),
+      const SizedBox(height: 16),
+      const Text("Sin conexión activa", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      Text(_lastSyncTime != null ? "Última sincronización: ${_lastSyncTime!.day}/${_lastSyncTime!.month} a las ${_lastSyncTime!.hour.toString().padLeft(2,'0')}:${_lastSyncTime!.minute.toString().padLeft(2,'0')}" : "Todavía sin datos sincronizados", style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center),
+      const SizedBox(height: 24),
+      ElevatedButton.icon(
+        onPressed: _conectarAhora,
+        icon: const Icon(Icons.sync),
+        label: const Text("CONECTAR Y ACTUALIZAR"),
+        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14), textStyle: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      const SizedBox(height: 12),
+      const Text("La sincronización automática en segundo plano sigue funcionando aunque no conectes.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
+    ])));
   }
 
   @override
@@ -656,9 +680,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
           Expanded(
             child: Stack(
               children: [
-                Offstage(offstage: !_showWebFallback, child: InAppWebView(initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')), initialSettings: InAppWebViewSettings(userAgent: 'Mozilla/5.0 (Linux; Android 13)', javaScriptEnabled: true, domStorageEnabled: true), onWebViewCreated: (c) { _webController = c; c.addJavaScriptHandler(handlerName: 'appLog', callback: (a) => _addLog(a[0].toString())); c.addJavaScriptHandler(handlerName: 'spaNav', callback: (a) => _comprobarAccesoExitoso(a[0].toString())); c.addJavaScriptHandler(handlerName: 'consumosIberdrola', callback: (a) => _procesarCurvasHorarias(a[0])); }, onUpdateVisitedHistory: (c, url, r) => _comprobarAccesoExitoso(url?.path ?? ''), onLoadStop: (c, url) async { if ((url?.path ?? '').contains('login') && _email.isNotEmpty && !_isLoggedIn) { setState(() => _status = "Autenticando..."); _rescueTimer = Timer(const Duration(seconds: 15), () { if (!_isLoggedIn && mounted) setState(() => _showWebFallback = true); }); await c.evaluateJavascript(source: "setInterval(() => { let cp = window.location.pathname; if (window._lp !== cp) { window._lp = cp; window.flutter_inappwebview.callHandler('spaNav', cp); } }, 1000); async function autoLogin(e,p,a){ let btn=Array.from(document.querySelectorAll('button')).find(b=>b.innerText&&b.innerText.toLowerCase().includes('entrar')); let em=document.querySelector('input[type=\"email\"]')||document.querySelector('input[name=\"email\"]'); let pw=document.querySelector('input[type=\"password\"]'); if(em&&pw&&btn){ const ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,\"value\").set; em.focus();ns.call(em,e);em.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,400)); pw.focus();ns.call(pw,p);pw.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,600)); btn.click(); } else if(a>0) setTimeout(()=>autoLogin(e,p,a-1),1500); } autoLogin('$_email','$_pass',6);"); } })),
+                Offstage(offstage: !_showWebFallback, child: InAppWebView(initialUrlRequest: URLRequest(url: WebUri('about:blank')), initialSettings: InAppWebViewSettings(userAgent: 'Mozilla/5.0 (Linux; Android 13)', javaScriptEnabled: true, domStorageEnabled: true), onWebViewCreated: (c) { _webController = c; c.addJavaScriptHandler(handlerName: 'appLog', callback: (a) => _addLog(a[0].toString())); c.addJavaScriptHandler(handlerName: 'spaNav', callback: (a) => _comprobarAccesoExitoso(a[0].toString())); c.addJavaScriptHandler(handlerName: 'consumosIberdrola', callback: (a) => _procesarCurvasHorarias(a[0])); }, onUpdateVisitedHistory: (c, url, r) => _comprobarAccesoExitoso(url?.path ?? ''), onLoadStop: (c, url) async { if ((url?.path ?? '').contains('login') && _email.isNotEmpty && !_isLoggedIn) { setState(() => _status = "Autenticando..."); _rescueTimer = Timer(const Duration(seconds: 15), () { if (!_isLoggedIn && mounted) setState(() => _showWebFallback = true); }); await c.evaluateJavascript(source: "setInterval(() => { let cp = window.location.pathname; if (window._lp !== cp) { window._lp = cp; window.flutter_inappwebview.callHandler('spaNav', cp); } }, 1000); async function autoLogin(e,p,a){ let btn=Array.from(document.querySelectorAll('button')).find(b=>b.innerText&&b.innerText.toLowerCase().includes('entrar')); let em=document.querySelector('input[type=\"email\"]')||document.querySelector('input[name=\"email\"]'); let pw=document.querySelector('input[type=\"password\"]'); if(em&&pw&&btn){ const ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,\"value\").set; em.focus();ns.call(em,e);em.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,400)); pw.focus();ns.call(pw,p);pw.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,600)); btn.click(); } else if(a>0) setTimeout(()=>autoLogin(e,p,a-1),1500); } autoLogin('$_email','$_pass',6);"); } })),
                 if (!_showWebFallback) ...[
-                  if (_email.isEmpty) _pantallaLoginNatva() else if (!_isLoggedIn) Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const CircularProgressIndicator(color: Color(0xFF00E5FF)), const SizedBox(height: 24), Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))])) else RefreshIndicator(onRefresh: _forzarRefrescoCompleto, color: const Color(0xFF00E5FF), child: ListView(padding: const EdgeInsets.all(16), children: [ 
+                  if (_email.isEmpty) _pantallaLoginNatva() else if (!_isLoggedIn && !_conectando) _pantallaConectar() else if (!_isLoggedIn) Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const CircularProgressIndicator(color: Color(0xFF00E5FF)), const SizedBox(height: 24), Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))])) else RefreshIndicator(onRefresh: _forzarRefrescoCompleto, color: const Color(0xFF00E5FF), child: ListView(padding: const EdgeInsets.all(16), children: [ 
                     
                     _bannerEstadoSync(), const SizedBox(height: 12),
                     _tarjetaDinero(), const SizedBox(height: 16),
