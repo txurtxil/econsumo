@@ -153,7 +153,13 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   double _kwhTotal = 0.0; double _kwhValle = 0.0; double _kwhLlano = 0.0; double _kwhPunta = 0.0;
   double _costeEnergia = 0.0; double _costePotencia = 0.0;
   double _cuotaOctopus = 0.0; 
-  final double _impuestoElectrico = 1.05113; final double _iva = 1.10;
+  final double _impuestoElectrico = 1.05113; final double _iva = 1.21;
+
+  // --- TARIFA OCTOPUS RELAX (precio único 24h, sin impuestos) ---
+  static const double kPrecioUnicoKwh = 0.103;       // €/kWh, igual a todas horas
+  static const double kPrecioPotenciaDia = 0.093;    // €/kW/día, P1 y P2 iguales
+  static const double kPotenciaP1 = 4.4; static const double kPotenciaP2 = 5.7; // kW contratados
+  static const double kBonoSocialDia = 0.01274; static const double kAlquilerContadorDia = 0.04452;
   
   List<Map<String, dynamic>> _topHoras = []; List<Map<String, dynamic>> _desgloseDiario = []; 
   Map<String, List<double>> _horasPorDia = {}; List<double> _promedioPorHora = []; 
@@ -164,10 +170,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   late DateTime _cycleStart; late DateTime _cycleEnd; late DateTime _fetchEnd;
   Map<String, List<double>> _preciosHistoricos = {}; double _costeExactoFlexi = 0.0;
   
-  String _tarifaSeleccionada = 'Octopus Flexi Live';
+  String _tarifaSeleccionada = 'Octopus Relax';
+  int _diasCalculo = 0;
   final Map<String, Map<String, double>> _tarifasSimulator = { 
     'Octopus Flexi Live': {'p': 0.0, 'l': 0.0, 'v': 0.0},
-    'Octopus Relax': {'p': 0.113, 'l': 0.113, 'v': 0.113}, 
+    'Octopus Relax': {'p': kPrecioUnicoKwh, 'l': kPrecioUnicoKwh, 'v': kPrecioUnicoKwh}, 
     'Oct. 3 Periodos': {'p': 0.162, 'l': 0.114, 'v': 0.076}, 
     'Iberdrola Noche': {'p': 0.205, 'l': 0.205, 'v': 0.108} 
   };
@@ -187,10 +194,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   void initState() {
     super.initState();
     _email = widget.savedEmail; _pass = widget.savedPass; _groqKey = widget.savedGroq;
-    _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion();
+    _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.9.5. Conexión manual a i-DE.");
+    _addLog("eConsumo v36.10.0. Tarifa Octopus Relax (precio único 24h).");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -229,6 +236,14 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _logScrollController.dispose();
     _deviceCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _cargarTarifaGuardada() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? t = prefs.getString('tarifa_activa');
+    if (t != null && _tarifasSimulator.containsKey(t) && mounted) {
+      setState(() { _tarifaSeleccionada = t; });
+    }
   }
 
   Future<void> _cargarEstadoSincronizacion() async {
@@ -335,11 +350,31 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   void _recalcularCosteEnergia() { 
     if (_tarifaSeleccionada == 'Octopus Flexi Live') { 
         setState(() { _costeEnergia = _costeExactoFlexi; }); 
+    } else if (_tarifaSeleccionada == 'Octopus Relax') {
+        // Precio único 24h: el desglose P/L/V se mantiene solo como estadística.
+        setState(() { _costeEnergia = _kwhTotal * kPrecioUnicoKwh; });
     } else { 
         final precios = _tarifasSimulator[_tarifaSeleccionada]!; 
         setState(() { _costeEnergia = (_kwhPunta * precios['p']!) + (_kwhLlano * precios['l']!) + (_kwhValle * precios['v']!); }); 
     }
+    _aplicarCostesFijos();
     _sincronizarWidgetNativo(); 
+  }
+
+  // Potencia + costes regulados según la tarifa activa.
+  void _aplicarCostesFijos() {
+    if (_diasCalculo <= 0) return;
+    if (_tarifaSeleccionada == 'Octopus Relax') {
+      setState(() {
+        _costePotencia = (kPotenciaP1 + kPotenciaP2) * kPrecioPotenciaDia * _diasCalculo;
+        _cuotaOctopus = (kBonoSocialDia + kAlquilerContadorDia) * _diasCalculo;
+      });
+    } else {
+      setState(() {
+        _costePotencia = ((4.4 * 0.076) + (5.7 * 0.002)) * _diasCalculo;
+        _cuotaOctopus = (0.123 + 0.019 + 0.027) * _diasCalculo;
+      });
+    }
   }
   
   Future<void> _sincronizarWidgetNativo() async { 
@@ -348,7 +383,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; 
       double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; 
       
-      String textoWidget = "Carga nocturna con tarifa indexada, ahorras y cuidas tu planeta.";
+      String textoWidget = _tarifaSeleccionada == 'Octopus Relax'
+          ? "Precio fijo 24h: carga tu EV a cualquier hora, mismo coste."
+          : "Carga nocturna con tarifa indexada, ahorras y cuidas tu planeta.";
       if (_consejoIA.isNotEmpty && !_consejoIA.contains("Analizando")) { textoWidget = "🔌 $_consejoIA"; }
 
       // Últimos 7 días reales (no futuros) para la gráfica del widget: "dd/MM|kwh;dd/MM|kwh;..."
@@ -378,7 +415,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     } 
   }
 
-  Future<void> _consultarGroqIA() async { if (_groqKey.isEmpty || _topHoras.isEmpty) return; setState(() => _consejoIA = "Analizando consumo..."); try { String picos = _topHoras.map((h) => "${h['hora']}:00 (${h['kwh'].toStringAsFixed(1)}kWh)").join(", "); final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "user", "content": "Usuario va a tener coche Leapmotor eléctrico. Sus picos hoy son: $picos. Dale 1 consejo breve (10 palabras) animándole sobre la tarifa indexada y la carga."} ], "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setState(() { _consejoIA = jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString().replaceAll('"', '').trim(); }); _sincronizarWidgetNativo(); } } catch(e) {} }
+  Future<void> _consultarGroqIA() async { if (_groqKey.isEmpty || _topHoras.isEmpty) return; setState(() => _consejoIA = "Analizando consumo..."); try { String picos = _topHoras.map((h) => "${h['hora']}:00 (${h['kwh'].toStringAsFixed(1)}kWh)").join(", "); String contextoTarifa = _tarifaSeleccionada == 'Octopus Relax' ? "Su tarifa es Octopus Relax de PRECIO FIJO 24h (0,103 €/kWh): no hay horas más baratas, así que NO recomiendes horarios de carga; céntrate en hábitos, potencia contratada o eficiencia." : "Su tarifa es indexada: anímale sobre la carga en horas baratas."; final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "user", "content": "Usuario con coche Leapmotor eléctrico. $contextoTarifa Sus picos hoy son: $picos. Dale 1 consejo breve (10 palabras)."} ], "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setState(() { _consejoIA = jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString().replaceAll('"', '').trim(); }); _sincronizarWidgetNativo(); } } catch(e) {} }
 
   void _procesarCurvasHorarias(List<dynamic> horas) {
     if (horas.isEmpty) {
@@ -463,13 +500,13 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                 if(data.isNotEmpty && data[0]['totalesPeriodosTarifarios'] != null) { 
                   double p = (double.tryParse(data[0]['totalesPeriodosTarifarios'][0].toString())??0)/1000; double l = (double.tryParse(data[0]['totalesPeriodosTarifarios'][1].toString())??0)/1000; double v = (double.tryParse(data[0]['totalesPeriodosTarifarios'][2].toString())??0)/1000; 
                   int diasCalculo = _fetchEnd.difference(_cycleStart).inDays + 1; 
+                  _diasCalculo = diasCalculo;
                   setState(() { 
                       _kwhTotal = p+l+v; _kwhPunta = p; _kwhLlano = l; _kwhValle = v; 
-                      _costePotencia = ((4.4 * 0.076) + (5.7 * 0.002)) * diasCalculo; 
-                      _cuotaOctopus = (0.123 + 0.019 + 0.027) * diasCalculo;
                       if (_costeExactoFlexi == 0.0) { _costeExactoFlexi = (p * 0.145) + (l * 0.098) + (v * 0.055); }
                       _lastSyncTime = DateTime.now(); _lastSyncError = null;
                   });
+                  _aplicarCostesFijos();
                   final prefsSync = await SharedPreferences.getInstance();
                   await prefsSync.setString('last_sync_ts', _lastSyncTime!.toIso8601String());
                   await prefsSync.remove('last_sync_error');
@@ -525,7 +562,8 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       double maxKwh = 0.001;
       for (var dia in _desgloseDiario) { if(dia['isFuture'] == false && dia['kwh'] > maxKwh) maxKwh = dia['kwh']; }
 
-      String t = "        OCTOPUS FLEXI v36   \n------------------------------\nCiclo: ${_formatDate(_cycleStart)} a ${_formatDate(_cycleEnd)}\nDatos hasta: ${_formatDateShort(_fetchEnd)}\n------------------------------\n\n";
+      String cabecera = _tarifaSeleccionada == 'Octopus Relax' ? "OCTOPUS RELAX v36 (precio fijo 24h)" : "OCTOPUS FLEXI v36";
+      String t = "        $cabecera   \n------------------------------\nCiclo: ${_formatDate(_cycleStart)} a ${_formatDate(_cycleEnd)}\nDatos hasta: ${_formatDateShort(_fetchEnd)}\n------------------------------\n\n";
       
       double totalEurosCiclo = 0;
       double totalKwhCiclo = 0;
@@ -590,7 +628,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   void _configurarFranjaHoraria(String fecha, int diaIndex) { double minH = 0; double maxH = 24; showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (context, setStateSB) => AlertDialog(backgroundColor: Colors.white, title: Text("Filtrar horas: $fecha", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), content: Column(mainAxisSize: MainAxisSize.min, children: [Text("Desde las ${minH.toInt()}:00 hasta las ${maxH.toInt()}:00", style: const TextStyle(color: Colors.blueGrey, fontWeight: FontWeight.bold)), const SizedBox(height: 10), RangeSlider(values: RangeValues(minH, maxH), min: 0, max: 24, divisions: 24, activeColor: const Color(0xFF00E5FF), labels: RangeLabels("${minH.toInt()}:00", "${maxH.toInt()}:00"), onChanged: (v) { setStateSB((){ minH = v.start; maxH = v.end; }); })]), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("CANCELAR", style: TextStyle(color: Colors.grey))), ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87), onPressed: (){ Navigator.pop(ctx); _mostrarTicket24hGenerado(fecha, diaIndex, minH.toInt(), maxH.toInt()); }, child: const Text("PREPARAR TICKET", style: TextStyle(fontWeight: FontWeight.bold)))]))); }
 
   void _mostrarTicket24hGenerado(String fecha, int diaIndex, int startH, int endH) {
-    List<double> horas = _horasPorDia[fecha] ?? []; String t = "        OCTOPUS FLEXI v36   \n------------------------------\nDesglose $fecha\nFranja: $startH:00 a $endH:00\n------------------------------\n\n"; double totalKwh = 0; double totalEurosFranja = 0; double maxKwh = 0; for(var h in horas) if(h > maxKwh) maxKwh = h;
+    List<double> horas = _horasPorDia[fecha] ?? []; String cabeceraH = _tarifaSeleccionada == 'Octopus Relax' ? "OCTOPUS RELAX v36" : "OCTOPUS FLEXI v36"; String t = "        $cabeceraH   \n------------------------------\nDesglose $fecha\nFranja: $startH:00 a $endH:00\n------------------------------\n\n"; double totalKwh = 0; double totalEurosFranja = 0; double maxKwh = 0; for(var h in horas) if(h > maxKwh) maxKwh = h;
     for(int i = startH; i < endH; i++) {
        if (i < horas.length) {
          double costeHora = 0.0; String tramo = "V";
@@ -618,7 +656,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     } catch(e) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error obteniendo precios.'))); _addLog("Error Tickets: $e"); }
   }
 
-  void _abrirChatIA() { showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), builder: (context) => StatefulBuilder(builder: (BuildContext context, StateSetter setModalState) { TextEditingController txtCtrl = TextEditingController(); Future<void> enviarMensaje() async { if (txtCtrl.text.isEmpty) return; String userTxt = txtCtrl.text; txtCtrl.clear(); setModalState(() { _chatMessages.add({"role": "user", "msg": userTxt}); _chatMessages.add({"role": "ai", "msg": "Calculando con IA..."}); }); try { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; List msgs = [{"role": "system", "content": "Eres el Oráculo del Leapmotor B10. Ayudas al usuario a optimizar su consumo eléctrico en casa y en el coche con tarifa indexada Octopus Flexi."}, {"role": "user", "content": "Usuario gastó ${totalEuros.toStringAsFixed(2)}€ hasta hoy en el ciclo."}]; for(var m in _chatMessages) { if(m['msg'] != "Calculando con IA...") msgs.add({"role": m['role'] == "user" ? "user" : "assistant", "content": m['msg']}); } final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": msgs, "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setModalState(() { _chatMessages.last = {"role": "ai", "msg": jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString()}; }); } } catch(e) {} } return Padding(padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom), child: Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(children: [const Text("Oráculo del Leapmotor", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))), const Divider(), Expanded(child: ListView.builder(itemCount: _chatMessages.length, itemBuilder: (c, i) { bool isUser = _chatMessages[i]['role'] == 'user'; return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: isUser ? const Color(0xFF00E5FF) : Colors.cyan.shade50, borderRadius: BorderRadius.circular(16)), child: Text(_chatMessages[i]['msg']!, style: TextStyle(color: isUser ? Colors.black87 : Colors.black87, fontWeight: isUser ? FontWeight.normal : FontWeight.w500)))); })), Row(children: [ Expanded(child: TextField(controller: txtCtrl, decoration: InputDecoration(hintText: "Pregunta...", border: OutlineInputBorder(borderRadius: BorderRadius.circular(20))))), IconButton(icon: const Icon(Icons.send, color: Color(0xFF00E5FF)), onPressed: enviarMensaje) ]) ]))); })); }
+  void _abrirChatIA() { showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), builder: (context) => StatefulBuilder(builder: (BuildContext context, StateSetter setModalState) { TextEditingController txtCtrl = TextEditingController(); Future<void> enviarMensaje() async { if (txtCtrl.text.isEmpty) return; String userTxt = txtCtrl.text; txtCtrl.clear(); setModalState(() { _chatMessages.add({"role": "user", "msg": userTxt}); _chatMessages.add({"role": "ai", "msg": "Calculando con IA..."}); }); try { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; List msgs = [{"role": "system", "content": _tarifaSeleccionada == 'Octopus Relax' ? "Eres el Oráculo del Leapmotor B10. El usuario tiene tarifa Octopus Relax de PRECIO FIJO 24h (0,103 €/kWh): no hay horas más baratas, no recomiendes horarios; ayuda con hábitos, potencia y eficiencia." : "Eres el Oráculo del Leapmotor B10. Ayudas al usuario a optimizar su consumo eléctrico en casa y en el coche con tarifa indexada Octopus Flexi."}, {"role": "user", "content": "Usuario gastó ${totalEuros.toStringAsFixed(2)}€ hasta hoy en el ciclo."}]; for(var m in _chatMessages) { if(m['msg'] != "Calculando con IA...") msgs.add({"role": m['role'] == "user" ? "user" : "assistant", "content": m['msg']}); } final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": msgs, "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setModalState(() { _chatMessages.last = {"role": "ai", "msg": jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString()}; }); } } catch(e) {} } return Padding(padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom), child: Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(children: [const Text("Oráculo del Leapmotor", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))), const Divider(), Expanded(child: ListView.builder(itemCount: _chatMessages.length, itemBuilder: (c, i) { bool isUser = _chatMessages[i]['role'] == 'user'; return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: isUser ? const Color(0xFF00E5FF) : Colors.cyan.shade50, borderRadius: BorderRadius.circular(16)), child: Text(_chatMessages[i]['msg']!, style: TextStyle(color: isUser ? Colors.black87 : Colors.black87, fontWeight: isUser ? FontWeight.normal : FontWeight.w500)))); })), Row(children: [ Expanded(child: TextField(controller: txtCtrl, decoration: InputDecoration(hintText: "Pregunta...", border: OutlineInputBorder(borderRadius: BorderRadius.circular(20))))), IconButton(icon: const Icon(Icons.send, color: Color(0xFF00E5FF)), onPressed: enviarMensaje) ]) ]))); })); }
 
   Widget _tarjetaDinero() { 
     double total = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; 
@@ -663,7 +701,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
             underline: Container(), 
             icon: const Icon(Icons.arrow_drop_down, color: Colors.white), 
             items: _tarifasSimulator.keys.map((String val) => DropdownMenuItem(value: val, child: Text(val))).toList(), 
-            onChanged: (String? n) { if(n != null) { setState(() => _tarifaSeleccionada = n); _recalcularCosteEnergia(); } }
+            onChanged: (String? n) { if(n != null) { setState(() => _tarifaSeleccionada = n); SharedPreferences.getInstance().then((p) => p.setString('tarifa_activa', n)); _recalcularCosteEnergia(); } }
           )
         )
       ])
