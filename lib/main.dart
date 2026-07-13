@@ -15,7 +15,7 @@ import 'dart:async';
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 // RESTAURAMOS EL DÍA DE CORTE AL 24 TRAS EL CAMBIO DE POTENCIA DEFINITIVO
-const int DIA_CORTE_OCTOPUS = 24;
+int DIA_CORTE_OCTOPUS = 24; // Configurable desde la app (guardado en prefs como 'dia_corte')
 
 bool _esFestivoNacional(DateTime d) {
   final festivos = {
@@ -66,6 +66,7 @@ void callbackDispatcher() {
     if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
         final String email = prefs.getString('email') ?? ''; final String pass = prefs.getString('pass') ?? '';
         if (email.isEmpty || pass.isEmpty) return Future.value(true);
+        DIA_CORTE_OCTOPUS = prefs.getInt('dia_corte') ?? 24;
         HeadlessInAppWebView? headlessWebView; bool success = false; String errorMsg = '';
         headlessWebView = HeadlessInAppWebView(
           initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
@@ -197,7 +198,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.10.0. Tarifa Octopus Relax (precio único 24h).");
+    _addLog("eConsumo v36.10.1. Día de inicio de ciclo configurable.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -241,9 +242,42 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<void> _cargarTarifaGuardada() async {
     final prefs = await SharedPreferences.getInstance();
     final String? t = prefs.getString('tarifa_activa');
-    if (t != null && _tarifasSimulator.containsKey(t) && mounted) {
-      setState(() { _tarifaSeleccionada = t; });
-    }
+    final int? dc = prefs.getInt('dia_corte');
+    if (!mounted) return;
+    setState(() {
+      if (t != null && _tarifasSimulator.containsKey(t)) _tarifaSeleccionada = t;
+      if (dc != null && dc >= 1 && dc <= 28) { DIA_CORTE_OCTOPUS = dc; _calcularFechasCiclo(); }
+    });
+  }
+
+  Future<void> _cambiarDiaCorte() async {
+    int seleccionado = DIA_CORTE_OCTOPUS;
+    final int? nuevo = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Día de inicio del ciclo"),
+        content: StatefulBuilder(builder: (ctx2, setD) => Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text("Día del mes en que empieza tu ciclo de facturación (p.ej. 13 si tu contrato Relax empezó el 13).", style: TextStyle(fontSize: 13)),
+          const SizedBox(height: 12),
+          DropdownButton<int>(value: seleccionado, isExpanded: true, items: List.generate(28, (i) => DropdownMenuItem(value: i + 1, child: Text("Día ${i + 1}"))), onChanged: (v) { if (v != null) setD(() => seleccionado = v); }),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, seleccionado), child: const Text("Guardar")),
+        ],
+      ),
+    );
+    if (nuevo == null || nuevo == DIA_CORTE_OCTOPUS) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('dia_corte', nuevo);
+    if (!mounted) return;
+    setState(() {
+      DIA_CORTE_OCTOPUS = nuevo; _cicloSeleccionadoIndex = 0; _calcularFechasCiclo();
+      _desgloseDiario.clear(); _horasPorDia.clear(); _topHoras.clear(); _promedioPorHora.clear();
+      _kwhTotal = 0.0; _costeEnergia = 0.0; _costeExactoFlexi = 0.0; _diasCalculo = 0;
+    });
+    _addLog("Día de corte cambiado al $nuevo. Ciclos recalculados.");
+    if (_isLoggedIn) _actualizarDatos();
   }
 
   Future<void> _cargarEstadoSincronizacion() async {
@@ -665,7 +699,8 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF00B4DB), Color(0xFF0083B0)]), borderRadius: BorderRadius.circular(20)), 
       child: Column(children: [
         
-        // LA BÓVEDA HISTORIAL (Desplegable mágico)
+        // LA BÓVEDA HISTORIAL (Desplegable mágico) + ajuste de día de corte
+        Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 16), 
           decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white54)), 
@@ -686,6 +721,8 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
             }
           )
         ),
+        IconButton(icon: const Icon(Icons.edit_calendar, color: Colors.white), tooltip: "Cambiar día de inicio del ciclo", onPressed: _cambiarDiaCorte),
+        ]),
 
         const SizedBox(height: 16), 
         Text("${total.toStringAsFixed(2)} €", style: const TextStyle(color: Colors.white, fontSize: 50, fontWeight: FontWeight.w900)), 
