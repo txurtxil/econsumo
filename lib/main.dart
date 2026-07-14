@@ -188,7 +188,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   List<Map<String, String>> _chatMessages = [];
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
-  bool _conectando = false;
+  bool _conectando = false; String _cups = '';
   Map<String, double> _comparadorTarifas = {};
 
   @override
@@ -198,7 +198,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.10.1. Día de inicio de ciclo configurable.");
+    _addLog("eConsumo v36.11.0. Exportación CSV para comparador CNMC.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -243,8 +243,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     final prefs = await SharedPreferences.getInstance();
     final String? t = prefs.getString('tarifa_activa');
     final int? dc = prefs.getInt('dia_corte');
+    final String cups = prefs.getString('cups') ?? '';
     if (!mounted) return;
     setState(() {
+      _cups = cups;
       if (t != null && _tarifasSimulator.containsKey(t)) _tarifaSeleccionada = t;
       if (dc != null && dc >= 1 && dc <= 28) { DIA_CORTE_OCTOPUS = dc; _calcularFechasCiclo(); }
     });
@@ -763,6 +765,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                     _tarjetaDinero(), const SizedBox(height: 16),
                     _tarjetaDesglose(), const SizedBox(height: 16),
                     _tarjetaComparadorTarifas(), const SizedBox(height: 16),
+                    _tarjetaCNMC(), const SizedBox(height: 16),
 
                     _tarjetaMeteoElectrica(), const SizedBox(height: 16),
                     
@@ -870,6 +873,90 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         ),
         const SizedBox(height: 4),
         const Text("Solo energía (sin potencia fija ni impuestos), calculado con tu consumo horario real.", style: TextStyle(fontSize: 10, color: Colors.grey, fontStyle: FontStyle.italic)),
+      ]),
+    );
+  }
+
+  // --- COMPARADOR OFICIAL CNMC ---
+  // Genera un CSV de consumos horarios en formato i-DE, aceptado por
+  // comparador.cnmc.gob.es (subir fichero de consumos). Se guarda en Descargas.
+  Future<void> _exportarCsvCNMC() async {
+    if (_horasPorDia.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay datos horarios cargados. Conecta y actualiza primero.'), backgroundColor: Colors.orange));
+      return;
+    }
+    if (_cups.isEmpty) {
+      await _pedirCups();
+      if (_cups.isEmpty) return;
+    }
+    final buffer = StringBuffer("CUPS;Fecha;Hora;Consumo;Metodo_obtencion\n");
+    final fechas = _horasPorDia.keys.toList()..sort((a, b) {
+      List<String> pa = a.split('/'), pb = b.split('/');
+      return DateTime(2000 + int.parse(pa[2].length == 4 ? pa[2].substring(2) : pa[2]), int.parse(pa[1]), int.parse(pa[0]))
+          .compareTo(DateTime(2000 + int.parse(pb[2].length == 4 ? pb[2].substring(2) : pb[2]), int.parse(pb[1]), int.parse(pb[0])));
+    });
+    int filas = 0;
+    for (final fecha in fechas) {
+      final horas = _horasPorDia[fecha]!;
+      for (int h = 0; h < horas.length; h++) {
+        buffer.writeln("$_cups;$fecha;${h + 1};${horas[h].toStringAsFixed(3).replaceAll('.', ',')};R");
+        filas++;
+      }
+    }
+    final nombre = "consumos_econsumo_${DateTime.now().millisecondsSinceEpoch}.csv";
+    try {
+      final res = await const MethodChannel('widget_channel').invokeMethod('saveCsv', {'filename': nombre, 'content': buffer.toString()});
+      _addLog("CSV CNMC exportado ($filas filas): $nombre");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('CSV guardado en Descargas: $nombre'), backgroundColor: Colors.green, duration: const Duration(seconds: 5)));
+    } catch (e) {
+      _addLog("Error guardando CSV: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al guardar: $e'), backgroundColor: Colors.red));
+    }
+  }
+
+  Future<void> _pedirCups() async {
+    final ctrl = TextEditingController(text: _cups);
+    final String? nuevo = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Tu CUPS"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text("Código del punto de suministro (empieza por ES, aparece en tu factura). Se incluye en el CSV para el comparador CNMC.", style: TextStyle(fontSize: 13)),
+          const SizedBox(height: 12),
+          TextField(controller: ctrl, textCapitalization: TextCapitalization.characters, decoration: const InputDecoration(labelText: "CUPS", hintText: "ES00XXXXXXXXXXXXXXXX", border: OutlineInputBorder())),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim().toUpperCase()), child: const Text("Guardar")),
+        ],
+      ),
+    );
+    if (nuevo == null || nuevo.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('cups', nuevo);
+    if (mounted) setState(() { _cups = nuevo; });
+  }
+
+  Future<void> _abrirComparadorCNMC() async {
+    try { await launchUrl(Uri.parse('https://comparador.cnmc.gob.es/'), mode: LaunchMode.externalApplication); } catch (e) { _addLog("Error abriendo comparador CNMC: $e"); }
+  }
+
+  Widget _tarjetaCNMC() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [ const Icon(Icons.account_balance, size: 16, color: Colors.blueGrey), const SizedBox(width: 8), const Text("COMPARADOR OFICIAL CNMC", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const Spacer(), IconButton(icon: const Icon(Icons.badge_outlined, size: 18, color: Colors.blueGrey), tooltip: _cups.isEmpty ? "Configurar CUPS" : "CUPS: ${_cups.length > 8 ? _cups.substring(0, 8) : _cups}...", onPressed: _pedirCups) ]),
+        const Divider(),
+        const Text("Exporta tus consumos horarios reales y súbelos al comparador oficial (≈800 ofertas verificadas por la CNMC).", style: TextStyle(fontSize: 12, color: Colors.black87)),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: OutlinedButton.icon(onPressed: _exportarCsvCNMC, icon: const Icon(Icons.file_download, size: 18), label: const Text("EXPORTAR CSV", style: TextStyle(fontSize: 12)))),
+          const SizedBox(width: 8),
+          Expanded(child: ElevatedButton.icon(onPressed: _abrirComparadorCNMC, icon: const Icon(Icons.open_in_new, size: 18), label: const Text("ABRIR CNMC", style: TextStyle(fontSize: 12)), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87))),
+        ]),
       ]),
     );
   }
