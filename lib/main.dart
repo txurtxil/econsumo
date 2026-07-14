@@ -198,7 +198,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.11.0. Exportación CSV para comparador CNMC.");
+    _addLog("eConsumo v36.11.1. Fix exportación CSV CNMC + logs.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -881,36 +881,47 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   // Genera un CSV de consumos horarios en formato i-DE, aceptado por
   // comparador.cnmc.gob.es (subir fichero de consumos). Se guarda en Descargas.
   Future<void> _exportarCsvCNMC() async {
+    _addLog("CSV CNMC: iniciando exportación...");
     if (_horasPorDia.isEmpty) {
+      _addLog("CSV CNMC: sin datos horarios. Conecta primero.");
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay datos horarios cargados. Conecta y actualiza primero.'), backgroundColor: Colors.orange));
       return;
     }
     if (_cups.isEmpty) {
+      _addLog("CSV CNMC: falta CUPS, solicitando...");
       await _pedirCups();
-      if (_cups.isEmpty) return;
+      if (_cups.isEmpty) { _addLog("CSV CNMC: cancelado (sin CUPS)."); return; }
     }
-    final buffer = StringBuffer("CUPS;Fecha;Hora;Consumo;Metodo_obtencion\n");
-    final fechas = _horasPorDia.keys.toList()..sort((a, b) {
-      List<String> pa = a.split('/'), pb = b.split('/');
-      return DateTime(2000 + int.parse(pa[2].length == 4 ? pa[2].substring(2) : pa[2]), int.parse(pa[1]), int.parse(pa[0]))
-          .compareTo(DateTime(2000 + int.parse(pb[2].length == 4 ? pb[2].substring(2) : pb[2]), int.parse(pb[1]), int.parse(pb[0])));
-    });
-    int filas = 0;
-    for (final fecha in fechas) {
-      final horas = _horasPorDia[fecha]!;
-      for (int h = 0; h < horas.length; h++) {
-        buffer.writeln("$_cups;$fecha;${h + 1};${horas[h].toStringAsFixed(3).replaceAll('.', ',')};R");
-        filas++;
-      }
-    }
-    final nombre = "consumos_econsumo_${DateTime.now().millisecondsSinceEpoch}.csv";
     try {
+      // Las claves de _horasPorDia son "dd/MM" (sin año): reconstruimos la fecha
+      // completa usando el año del ciclo (cuidando ciclos que cruzan de diciembre a enero).
+      DateTime fechaCompleta(String ddMM) {
+        final p = ddMM.split('/');
+        final d = int.parse(p[0]); final m = int.parse(p[1]);
+        int y = _cycleStart.year;
+        if (m < _cycleStart.month) y = _cycleStart.year + 1; // ciclo cruza de año
+        return DateTime(y, m, d);
+      }
+      final fechas = _horasPorDia.keys.toList()..sort((a, b) => fechaCompleta(a).compareTo(fechaCompleta(b)));
+      final buffer = StringBuffer("CUPS;Fecha;Hora;Consumo;Metodo_obtencion\n");
+      int filas = 0;
+      for (final fecha in fechas) {
+        final fc = fechaCompleta(fecha);
+        final fechaCsv = "${fc.day.toString().padLeft(2, '0')}/${fc.month.toString().padLeft(2, '0')}/${fc.year}";
+        final horas = _horasPorDia[fecha]!;
+        for (int h = 0; h < horas.length; h++) {
+          buffer.writeln("$_cups;$fechaCsv;${h + 1};${horas[h].toStringAsFixed(3).replaceAll('.', ',')};R");
+          filas++;
+        }
+      }
+      _addLog("CSV CNMC: ${fechas.length} días, $filas filas generadas.");
+      final nombre = "consumos_econsumo_${DateTime.now().millisecondsSinceEpoch}.csv";
       final res = await const MethodChannel('widget_channel').invokeMethod('saveCsv', {'filename': nombre, 'content': buffer.toString()});
-      _addLog("CSV CNMC exportado ($filas filas): $nombre");
+      _addLog("CSV CNMC: guardado en Descargas → $nombre");
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('CSV guardado en Descargas: $nombre'), backgroundColor: Colors.green, duration: const Duration(seconds: 5)));
     } catch (e) {
-      _addLog("Error guardando CSV: $e");
+      _addLog("CSV CNMC: ERROR → $e");
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al guardar: $e'), backgroundColor: Colors.red));
     }
