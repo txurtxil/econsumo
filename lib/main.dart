@@ -64,59 +64,94 @@ void callbackDispatcher() {
     }
 
     if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
-        final String email = prefs.getString('email') ?? ''; final String pass = prefs.getString('pass') ?? '';
-        if (email.isEmpty || pass.isEmpty) return Future.value(true);
+        // Sincronización en 2º plano vía API oficial de Datadis (sin scraping).
+        final String nif = prefs.getString('email') ?? ''; final String pass = prefs.getString('pass') ?? '';
+        if (nif.isEmpty || pass.isEmpty) return Future.value(true);
         DIA_CORTE_OCTOPUS = prefs.getInt('dia_corte') ?? 24;
-        HeadlessInAppWebView? headlessWebView; bool success = false; String errorMsg = '';
-        headlessWebView = HeadlessInAppWebView(
-          initialUrlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')),
-          initialSettings: InAppWebViewSettings(userAgent: 'Mozilla/5.0 (Linux; Android 13)', javaScriptEnabled: true, domStorageEnabled: true),
-          onLoadStop: (controller, url) async {
-            if ((url?.path ?? '').contains('login')) await controller.evaluateJavascript(source: "async function autoLogin(e,p,a){ let btn=Array.from(document.querySelectorAll('button')).find(b=>b.innerText&&b.innerText.toLowerCase().includes('entrar')); let em=document.querySelector('input[type=\"email\"]')||document.querySelector('input[name=\"email\"]'); let pw=document.querySelector('input[type=\"password\"]'); if(em&&pw&&btn){ const ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,\"value\").set; em.focus();ns.call(em,e);em.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,400)); pw.focus();ns.call(pw,p);pw.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,600)); btn.click(); } else if(a>0) setTimeout(()=>autoLogin(e,p,a-1),1500); } autoLogin('$email','$pass',6);");
-          },
-          onUpdateVisitedHistory: (controller, url, androidIsReload) async {
-            if (url != null && !url.path.contains('login') && !url.path.contains('logout') && url.path.length > 5) {
-              DateTime now = DateTime.now(); DateTime startC;
-              if (now.day >= DIA_CORTE_OCTOPUS) startC = DateTime(now.year, now.month, DIA_CORTE_OCTOPUS); else startC = DateTime(now.year, now.month - 1, DIA_CORTE_OCTOPUS);
-              DateTime endC = DateTime.now().subtract(const Duration(days: 1)); if(endC.isBefore(startC)) endC = startC;
-              String sStart = "${startC.day.toString().padLeft(2,'0')}-${startC.month.toString().padLeft(2,'0')}-${startC.year}"; String sEnd = "${endC.day.toString().padLeft(2,'0')}-${endC.month.toString().padLeft(2,'0')}-${endC.year}";
-              var res = await controller.callAsyncJavaScript(functionBody: "let r = await fetch('https://www.i-de.es/consumidores/rest/consumoNew/obtenerDatosConsumoDH/$sStart/$sEnd/dias/USU/'); return await r.text();");
-              if (res?.value != null && !res!.value.toString().contains("WU1")) {
-                try {
-                    final List data = jsonDecode(res!.value.toString());
-                    if(data.isNotEmpty && data[0]['totalesPeriodosTarifarios'] != null) {
-                      double p = (double.tryParse(data[0]['totalesPeriodosTarifarios'][0].toString())??0)/1000; double l = (double.tryParse(data[0]['totalesPeriodosTarifarios'][1].toString())??0)/1000; double v = (double.tryParse(data[0]['totalesPeriodosTarifarios'][2].toString())??0)/1000;
-                      double coste = (p * 0.145) + (l * 0.098) + (v * 0.055); int diasRegistrados = endC.difference(startC).inDays + 1;
-                      
-                      double costeFijoPotencia = ((4.4 * 0.076) + (5.7 * 0.002)) * diasRegistrados;
-                      double costeFijoExtra = (0.123 + 0.019 + 0.027) * diasRegistrados;
-                      
-                      double total = (coste + costeFijoPotencia + costeFijoExtra) * 1.05113 * 1.10;
-                      DateTime finCicloTotal = DateTime(startC.year, startC.month + 1, DIA_CORTE_OCTOPUS - 1); int diasTotalesCiclo = finCicloTotal.difference(startC).inDays + 1;
-                      double pred = diasRegistrados > 0 ? (total / diasRegistrados) * diasTotalesCiclo : 0.0; 
-                      await flutterLocalNotificationsPlugin.show(0, "Ciclo: ${total.toStringAsFixed(2)} €", "🔌 Modo EV Activado", const NotificationDetails(android: AndroidNotificationDetails('econsumo', 'eConsumo Alertas', importance: Importance.low, priority: Priority.low)));
-                      try { const MethodChannel channel = MethodChannel('widget_channel'); await channel.invokeMethod('updateWidget', { 'fechas': '$sStart al $sEnd', 'euros': '${total.toStringAsFixed(2)} €', 'kwh': '${(p+l+v).toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': '🔌 EV Mode' }); } catch(e) {}
-                      success = true; headlessWebView?.dispose();
-                    } else {
-                      errorMsg = 'Respuesta sin totalesPeriodosTarifarios';
-                    }
-                } catch(e) { errorMsg = 'Error parseando JSON: $e'; }
+        bool success = false; String errorMsg = '';
+        try {
+          final rTok = await http.post(Uri.parse('https://datadis.es/nikola-auth/tokens/login'),
+              headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+              body: {'username': nif, 'password': pass}).timeout(const Duration(seconds: 30));
+          if (rTok.statusCode != 200 || rTok.body.trim().isEmpty) {
+            errorMsg = 'Login Datadis HTTP ${rTok.statusCode}';
+          } else {
+            final token = rTok.body.trim();
+            final rSup = await http.get(Uri.parse('https://datadis.es/api-private/api/get-supplies'),
+                headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+            if (rSup.statusCode != 200) {
+              errorMsg = 'get-supplies HTTP ${rSup.statusCode}';
+            } else {
+              final List sup = jsonDecode(utf8.decode(rSup.bodyBytes));
+              if (sup.isEmpty) {
+                errorMsg = 'Sin suministros';
               } else {
-                errorMsg = 'Sesión inválida (WU1) o respuesta vacía';
+                final String cups = sup.first['cups'].toString();
+                final String dist = sup.first['distributorCode'].toString();
+                final String pt = (sup.first['pointType'] ?? 5).toString();
+                DateTime now = DateTime.now(); DateTime startC;
+                if (now.day >= DIA_CORTE_OCTOPUS) { startC = DateTime(now.year, now.month, DIA_CORTE_OCTOPUS); } else { startC = DateTime(now.year, now.month - 1, DIA_CORTE_OCTOPUS); }
+                DateTime endC = now.subtract(const Duration(days: 1)); if (endC.isBefore(startC)) endC = startC;
+                final Set<String> meses = {};
+                for (DateTime c = startC; !c.isAfter(endC); c = c.add(const Duration(days: 1))) { meses.add("${c.year}/${c.month.toString().padLeft(2, '0')}"); }
+                double kwh = 0.0; Map<String, double> kwhDia = {}; DateTime? ultimo;
+                for (final m in meses) {
+                  final url = 'https://datadis.es/api-private/api/get-consumption-data?cups=$cups&distributorCode=$dist&startDate=$m&endDate=$m&measurementType=0&pointType=$pt';
+                  final rc = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 90));
+                  if (rc.statusCode != 200) { errorMsg = 'consumo $m HTTP ${rc.statusCode}'; continue; }
+                  for (final e in (jsonDecode(utf8.decode(rc.bodyBytes)) as List)) {
+                    try {
+                      final f = e['date'].toString().replaceAll('-', '/'); final pz = f.split('/');
+                      final dt = DateTime(int.parse(pz[0]), int.parse(pz[1]), int.parse(pz[2]));
+                      if (dt.isBefore(startC) || dt.isAfter(endC)) continue;
+                      final c = double.tryParse(e['consumptionKWh'].toString()) ?? 0.0;
+                      kwh += c; kwhDia[f] = (kwhDia[f] ?? 0) + c;
+                      if (c > 0 && (ultimo == null || dt.isAfter(ultimo))) ultimo = dt;
+                    } catch (_) {}
+                  }
+                }
+                if (kwh > 0) {
+                  if (ultimo != null) endC = ultimo;
+                  int dias = endC.difference(startC).inDays + 1; if (dias <= 0) dias = 1;
+                  // Tarifa Octopus Relax: precio único 24h
+                  double coste = kwh * 0.103;
+                  double costeFijoPotencia = (4.4 + 5.7) * 0.093 * dias;
+                  double costeFijoExtra = (0.01274 + 0.04452) * dias;
+                  double total = (coste + costeFijoPotencia + costeFijoExtra) * 1.05113 * 1.21;
+                  DateTime finCiclo = DateTime(startC.year, startC.month + 1, DIA_CORTE_OCTOPUS).subtract(const Duration(days: 1));
+                  int diasTotales = finCiclo.difference(startC).inDays + 1;
+                  double pred = (total / dias) * diasTotales;
+                  final claves = kwhDia.keys.toList()..sort();
+                  final ult7 = claves.length > 7 ? claves.sublist(claves.length - 7) : claves;
+                  final grafica = ult7.map((k) { final pz = k.split('/'); return "${pz[2]}/${pz[1]}|${kwhDia[k]!.toStringAsFixed(2)}"; }).join(";");
+                  await flutterLocalNotificationsPlugin.show(0, "Ciclo: ${total.toStringAsFixed(2)} €", "${kwh.toStringAsFixed(1)} kWh · Predicción ${pred.toStringAsFixed(2)} €",
+                      const NotificationDetails(android: AndroidNotificationDetails('econsumo_ch', 'eConsumo', importance: Importance.low, priority: Priority.low)));
+                  try {
+                    const MethodChannel channel = MethodChannel('widget_channel');
+                    await channel.invokeMethod('updateWidget', {
+                      'fechas': "${startC.day.toString().padLeft(2, '0')}/${startC.month.toString().padLeft(2, '0')} al ${endC.day.toString().padLeft(2, '0')}/${endC.month.toString().padLeft(2, '0')}",
+                      'euros': "${total.toStringAsFixed(2)} €",
+                      'kwh': "${kwh.toStringAsFixed(1)} kWh",
+                      'prediccion': "Predicción: ${pred.toStringAsFixed(2)} €",
+                      'consejo': '', 'grafica': grafica,
+                    });
+                  } catch (_) {}
+                  success = true;
+                } else if (errorMsg.isEmpty) {
+                  errorMsg = 'Datadis devolvió 0 kWh para el ciclo';
+                }
               }
             }
           }
-        );
-        await headlessWebView.run(); await Future.delayed(const Duration(seconds: 60)); headlessWebView.dispose();
+        } catch (e) { errorMsg = 'Excepción: $e'; }
 
         if (success) {
           await prefs.setString('last_sync_ts', DateTime.now().toIso8601String());
           await prefs.remove('last_sync_error');
         } else {
-          if (errorMsg.isEmpty) errorMsg = 'Timeout: no se salió del login en 60s (posible fallo de autologin o sesión)';
+          if (errorMsg.isEmpty) errorMsg = 'Fallo desconocido en sync Datadis';
           await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|$errorMsg');
-          // No esperamos al próximo ciclo de 12h: reintentamos en 20 min.
-          Workmanager().registerOneOffTask("retry_${DateTime.now().millisecondsSinceEpoch}", "retry_sync_diario", initialDelay: const Duration(minutes: 20), constraints: Constraints(networkType: NetworkType.connected));
+          Workmanager().registerOneOffTask("retry_${DateTime.now().millisecondsSinceEpoch}", "retry_sync_diario", initialDelay: const Duration(minutes: 60), constraints: Constraints(networkType: NetworkType.connected));
         }
         return Future.value(success);
     }
@@ -189,6 +224,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
   bool _conectando = false; String _cups = '';
+  String _datadisCups = ''; String _datadisDistCode = ''; String _datadisPointType = '5';
   Map<String, double> _comparadorTarifas = {};
 
   @override
@@ -198,17 +234,170 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v36.11.1. Fix exportación CSV CNMC + logs.");
+    _addLog("eConsumo v37.0.0. Datos vía API oficial de Datadis.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
   }
 
+  // ============================================================
+  //   DATADIS — API OFICIAL DE LAS DISTRIBUIDORAS (sustituye al
+  //   scraping de i-DE, que provocaba bloqueos de cuenta).
+  //   Doc: https://datadis.es  ·  Auth: NIF + contraseña Datadis
+  // ============================================================
+  static const String _kDatadisHost = 'https://datadis.es';
+
+  // Periodos 2.0TD: 1=punta, 2=llano, 3=valle. (Festivos nacionales
+  // no contemplados: cuentan como laborable. Con Relax el precio es
+  // plano, así que esto es solo estadística.)
+  int _periodoTarifario(DateTime d, int h) {
+    if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) return 3;
+    if ((h >= 10 && h < 14) || (h >= 18 && h < 22)) return 1;
+    if ((h >= 8 && h < 10) || (h >= 14 && h < 18) || h >= 22) return 2;
+    return 3;
+  }
+
+  Future<String?> _datadisLogin() async {
+    try {
+      final r = await http.post(
+        Uri.parse('$_kDatadisHost/nikola-auth/tokens/login'),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {'username': _email, 'password': _pass},
+      ).timeout(const Duration(seconds: 30));
+      if (r.statusCode == 200 && r.body.trim().isNotEmpty) return r.body.trim();
+      _addLog("Datadis: login rechazado (HTTP ${r.statusCode}).");
+    } catch (e) { _addLog("Datadis: error de red en login → $e"); }
+    return null;
+  }
+
+  Future<bool> _datadisSupplies(String token) async {
+    try {
+      final r = await http.get(Uri.parse('$_kDatadisHost/api-private/api/get-supplies'),
+          headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode != 200) { _addLog("Datadis: get-supplies HTTP ${r.statusCode}."); return false; }
+      final List d = jsonDecode(utf8.decode(r.bodyBytes));
+      if (d.isEmpty) { _addLog("Datadis: no hay suministros asociados a tu NIF."); return false; }
+      Map s = d.first;
+      if (_cups.isNotEmpty) {
+        for (final e in d) {
+          if (e['cups'].toString().toUpperCase().startsWith(_cups.toUpperCase().substring(0, _cups.length > 20 ? 20 : _cups.length))) { s = e; break; }
+        }
+      }
+      _datadisCups = s['cups'].toString();
+      _datadisDistCode = s['distributorCode'].toString();
+      _datadisPointType = (s['pointType'] ?? 5).toString();
+      if (_cups.isEmpty) {
+        _cups = _datadisCups;
+        (await SharedPreferences.getInstance()).setString('cups', _cups);
+      }
+      _addLog("Datadis: suministro OK (dist. $_datadisDistCode, tipo $_datadisPointType).");
+      return true;
+    } catch (e) { _addLog("Datadis: error en get-supplies → $e"); return false; }
+  }
+
+  Future<List<dynamic>> _datadisConsumo(String token, String yyyyMM) async {
+    final url = '$_kDatadisHost/api-private/api/get-consumption-data'
+        '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
+        '&startDate=$yyyyMM&endDate=$yyyyMM&measurementType=0&pointType=$_datadisPointType';
+    try {
+      final r = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 90));
+      if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
+      if (r.statusCode == 429) { _addLog("Datadis: $yyyyMM ya consultado en 24h (429). Usando lo que haya."); return []; }
+      _addLog("Datadis: consumo $yyyyMM → HTTP ${r.statusCode}.");
+    } catch (e) { _addLog("Datadis: error consumo $yyyyMM → $e"); }
+    return [];
+  }
+
   Future<void> _conectarAhora() async {
-    if (_conectando || _isLoggedIn) return;
-    setState(() { _conectando = true; _status = "Conectando con i-DE..."; });
-    _addLog("Conexión manual iniciada por el usuario.");
-    await _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')));
+    if (_conectando) return;
+    if (_email.isEmpty || _pass.isEmpty) { _addLog("Faltan credenciales de Datadis."); return; }
+    setState(() { _conectando = true; _status = "Autenticando en Datadis..."; });
+    _addLog("Datadis: conexión manual iniciada.");
+
+    final token = await _datadisLogin();
+    if (token == null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|Login Datadis rechazado');
+      if (mounted) setState(() { _conectando = false; _status = "Error de login"; _lastSyncError = 'x|Login Datadis rechazado'; });
+      return;
+    }
+    _addLog("Datadis: token obtenido.");
+    if (!mounted) return;
+    setState(() => _status = "Leyendo suministro...");
+    if (!await _datadisSupplies(token)) { if (mounted) setState(() { _conectando = false; _status = "Sin suministros"; }); return; }
+
+    // Meses que cubre el ciclo (la API pide AAAA/MM)
+    final Set<String> meses = {};
+    final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
+    for (int i = 0; i < diasCiclo; i++) {
+      final dt = _cycleStart.add(Duration(days: i));
+      meses.add("${dt.year}/${dt.month.toString().padLeft(2, '0')}");
+    }
+
+    final Map<String, List<double>> porDia = {};
+    DateTime? ultimoDato;
+    for (final m in meses) {
+      if (mounted) setState(() => _status = "Descargando $m...");
+      _addLog("Datadis: pidiendo consumo de $m...");
+      final datos = await _datadisConsumo(token, m);
+      _addLog("Datadis: $m → ${datos.length} registros horarios.");
+      for (final e in datos) {
+        try {
+          final f = e['date'].toString().replaceAll('-', '/');
+          final partes = f.split('/');
+          if (partes.length != 3) continue;
+          final dt = DateTime(int.parse(partes[0]), int.parse(partes[1]), int.parse(partes[2]));
+          final hh = int.tryParse(e['time'].toString().split(':')[0]) ?? 0;
+          final idx = hh >= 1 ? hh - 1 : 0; // Datadis marca la hora FINAL del tramo
+          final kwh = double.tryParse(e['consumptionKWh'].toString()) ?? 0.0;
+          porDia.putIfAbsent(f, () => List.filled(24, 0.0));
+          if (idx >= 0 && idx < 24) porDia[f]![idx] = kwh;
+          if (kwh > 0 && (ultimoDato == null || dt.isAfter(ultimoDato))) ultimoDato = dt;
+        } catch (_) {}
+      }
+    }
+
+    if (porDia.isEmpty) {
+      _addLog("Datadis: sin datos para este ciclo.");
+      if (mounted) setState(() { _conectando = false; _status = "Sin datos"; });
+      return;
+    }
+
+    // El último día con datos manda (Datadis publica con D-1 / D-2 de retraso)
+    if (ultimoDato != null && _cicloSeleccionadoIndex == 0 && ultimoDato.isBefore(_fetchEnd)) {
+      _fetchEnd = ultimoDato;
+      _addLog("Datadis: datos disponibles hasta ${_fetchEnd.day}/${_fetchEnd.month}.");
+    }
+
+    // Aplanamos a la estructura que ya usa la app (Wh, índice d*24+h)
+    final List<dynamic> plano = [];
+    double p = 0, l = 0, v = 0;
+    for (int d = 0; d < diasCiclo; d++) {
+      final dt = _cycleStart.add(Duration(days: d));
+      final key = "${dt.year}/${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')}";
+      final horas = porDia[key] ?? List.filled(24, 0.0);
+      for (int h = 0; h < 24; h++) {
+        plano.add(horas[h] * 1000.0);
+        final per = _periodoTarifario(dt, h);
+        if (per == 1) p += horas[h]; else if (per == 2) l += horas[h]; else v += horas[h];
+      }
+    }
+
+    _diasCalculo = _fetchEnd.difference(_cycleStart).inDays + 1;
+    if (!mounted) return;
+    setState(() {
+      _kwhPunta = p; _kwhLlano = l; _kwhValle = v; _kwhTotal = p + l + v;
+      _isLoggedIn = true; _conectando = false; _status = "Datos actualizados";
+      _lastSyncTime = DateTime.now(); _lastSyncError = null;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_sync_ts', _lastSyncTime!.toIso8601String());
+    await prefs.remove('last_sync_error');
+    _addLog("Datadis: ${_kwhTotal.toStringAsFixed(1)} kWh (P:${p.toStringAsFixed(1)} L:${l.toStringAsFixed(1)} V:${v.toStringAsFixed(1)}).");
+
+    _aplicarCostesFijos();
+    await _descargarHistoricoPrecios();
+    _procesarCurvasHorarias(plano);
   }
 
   Widget _pantallaConectar() {
@@ -226,7 +415,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14), textStyle: const TextStyle(fontWeight: FontWeight.bold)),
       ),
       const SizedBox(height: 12),
-      const Text("La sincronización automática en segundo plano sigue funcionando aunque no conectes.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
+      const Text("Los datos se descargan de Datadis, la plataforma oficial de las distribuidoras.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
     ])));
   }
 
@@ -328,7 +517,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   }
   void _addLog(String msg) { if (!mounted) return; setState(() { _logs.add("[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $msg"); if (_logs.length > 50) _logs.removeAt(0); }); Future.delayed(const Duration(milliseconds: 100), () { if (_logScrollController.hasClients) _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent); }); }
   void _copiarLog() { Clipboard.setData(ClipboardData(text: _logs.join('\n'))); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Terminal copiada'))); }
-  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.clear(); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _groqKey = ''; _isLoggedIn = false; }); _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout'))); }
+  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.remove('email'); await prefs.remove('pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas."); }
   String _formatDate(DateTime d) => "${d.day.toString().padLeft(2,'0')}-${d.month.toString().padLeft(2,'0')}-${d.year}";
   String _formatDateShort(DateTime d) => "${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}";
 
@@ -369,15 +558,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   }
 
   Future<void> _forzarRefrescoCompleto() async {
-    _addLog("Iniciando purga de sesión fantasma...");
-    setState(() { _isLoggedIn = false; _status = "Cerrando sesión fantasma..."; _desgloseDiario.clear(); _costeEnergia = 0.0; _kwhTotal = 0.0; });
-    await _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/logout')));
-    await Future.delayed(const Duration(seconds: 2));
-    setState(() => _prediccionMeteo = "Recalculando radares..."); 
+    _addLog("Refresco manual solicitado.");
+    setState(() { _isLoggedIn = false; _status = "Refrescando..."; _desgloseDiario.clear(); _horasPorDia.clear(); _costeEnergia = 0.0; _kwhTotal = 0.0; _costeExactoFlexi = 0.0; });
+    setState(() => _prediccionMeteo = "Recalculando radares...");
     _analizarMeteoElectrica();
-    setState(() => _status = "Iniciando sesión desde cero...");
-    await _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login')));
-    await Future.delayed(const Duration(seconds: 3));
+    await _conectarAhora();
   }
 
   Future<void> _leerPLC({bool isBaseMeasurement = false}) async { setState(() { _loadingPLC = true; _instantWatts = "..."; }); _addLog("Negociando PLC..."); try { var res = await _webController?.callAsyncJavaScript(functionBody: "async function runHandshake() { try { await fetch('/consumidores/rest/loginNew/mantenerSesion/'); await fetch('/consumidores/rest/escenarioNew/validarComunicacionContador/'); await fetch('/consumidores/rest/escenarioNew/nuevoEscenario/'); await new Promise(r => setTimeout(r, 6000)); let r = await fetch('/consumidores/rest/escenarioNew/obtenerMedicionOnline/24'); let data = await r.json(); return data.valMagnitud || 'ERROR'; } catch(e) { return 'REINTENTAR'; } } let val = await runHandshake(); if(val === 'REINTENTAR') { await new Promise(r => setTimeout(r, 3000)); return await runHandshake(); } return val;").timeout(const Duration(seconds: 25)); if (res?.value != null && res!.value.toString() != "ERROR") { double w = double.parse(res!.value.toString()); setState(() { _instantWatts = "${w.toStringAsFixed(0)} W"; if (isBaseMeasurement) _baseWatts = w; }); if (!isBaseMeasurement && _baseWatts > 0) { _consultarGroqEficiencia(w - _baseWatts); } } else { setState(() { _instantWatts = "Fallo PLC"; }); } } catch(e) { setState(() => _instantWatts = "Timeout"); } finally { setState(() => _loadingPLC = false); } }
@@ -520,38 +705,20 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       try { final res = await http.get(Uri.parse("https://api.esios.ree.es/archives/70/download?date=$sDate")); if (res.statusCode == 200) { final j = jsonDecode(res.body); List<dynamic> precios = j['PVPC']; if (precios != null && precios.length >= 24) { _preciosHistoricos[fechaKey] = precios.map((p) { return double.parse(p['PCB'].toString().replaceAll(',', '.')) / 1000.0; }).toList().sublist(0, 24); return; } } } catch(e) {}
   }
 
-  Future<void> _actualizarDatos() async { 
-    String start = _formatDate(_cycleStart); String end = _formatDate(_fetchEnd); 
-    _addLog("Descargando E-SIOS ($start al $end)..."); List<Future<void>> tareas = []; DateTime dCursor = _cycleStart; DateTime today = DateTime.now();
+  // Descarga los precios PVPC de e-SIOS del ciclo (para la tarifa indexada).
+  Future<void> _descargarHistoricoPrecios() async {
+    String start = _formatDate(_cycleStart); String end = _formatDate(_fetchEnd);
+    _addLog("Descargando E-SIOS ($start al $end)...");
+    List<Future<void>> tareas = []; DateTime dCursor = _cycleStart; DateTime today = DateTime.now();
     DateTime fetchLimit = _fetchEnd; if (fetchLimit.isAfter(today)) fetchLimit = today;
     while (dCursor.isBefore(fetchLimit) || _formatDate(dCursor) == _formatDate(fetchLimit)) { tareas.add(_descargarPrecioDia(dCursor)); dCursor = dCursor.add(const Duration(days: 1)); }
     await Future.wait(tareas); _addLog("Histórico E-SIOS OK.");
-    try { 
-      var resLogin = await _webController?.callAsyncJavaScript(functionBody: "let r = await fetch('https://www.i-de.es/consumidores/rest/login/'); return await r.text();"); 
-      if (resLogin?.value != null && !resLogin!.value.toString().contains("WU1")) { 
-        var resDias = await _webController?.callAsyncJavaScript(functionBody: "let r = await fetch('https://www.i-de.es/consumidores/rest/consumoNew/obtenerDatosConsumoDH/$start/$end/dias/USU/'); return await r.text();");
-        if (resDias?.value != null && resDias!.value.toString().length > 10) {
-            try {
-                final List data = jsonDecode(resDias!.value.toString()); 
-                if(data.isNotEmpty && data[0]['totalesPeriodosTarifarios'] != null) { 
-                  double p = (double.tryParse(data[0]['totalesPeriodosTarifarios'][0].toString())??0)/1000; double l = (double.tryParse(data[0]['totalesPeriodosTarifarios'][1].toString())??0)/1000; double v = (double.tryParse(data[0]['totalesPeriodosTarifarios'][2].toString())??0)/1000; 
-                  int diasCalculo = _fetchEnd.difference(_cycleStart).inDays + 1; 
-                  _diasCalculo = diasCalculo;
-                  setState(() { 
-                      _kwhTotal = p+l+v; _kwhPunta = p; _kwhLlano = l; _kwhValle = v; 
-                      if (_costeExactoFlexi == 0.0) { _costeExactoFlexi = (p * 0.145) + (l * 0.098) + (v * 0.055); }
-                      _lastSyncTime = DateTime.now(); _lastSyncError = null;
-                  });
-                  _aplicarCostesFijos();
-                  final prefsSync = await SharedPreferences.getInstance();
-                  await prefsSync.setString('last_sync_ts', _lastSyncTime!.toIso8601String());
-                  await prefsSync.remove('last_sync_error');
-                }
-            } catch (err) { _addLog("Error JSON Días: $err"); }
-        }
-        await _webController?.evaluateJavascript(source: "(async function() { try { let rH = await fetch('https://www.i-de.es/consumidores/rest/consumoNew/obtenerDatosConsumoDH/$start/$end/horas/USU/'); let dH = await rH.json(); if(dH && dH.length > 0 && dH[0].valores) { window.flutter_inappwebview.callHandler('consumosIberdrola', dH[0].valores); } else { window.flutter_inappwebview.callHandler('consumosIberdrola', []); } } catch(e) { window.flutter_inappwebview.callHandler('consumosIberdrola', []); } })();"); 
-      } 
-    } catch(e) { _addLog("Error API Global: $e"); } 
+  }
+
+  // Punto de entrada único: ahora todo viene de Datadis.
+  Future<void> _actualizarDatos() async {
+    _isLoggedIn = false;
+    await _conectarAhora();
   }
 
   Future<void> _enviarARawBT(String ticketText) async { final Uri url = Uri.parse("rawbt:base64,${base64Encode(utf8.encode(ticketText))}"); try { await launchUrl(url); _addLog("Ticket enviado."); } catch (e) { _addLog("ERROR RawBT."); } }
@@ -974,7 +1141,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   // --- WIDGETS RESTANTES DE LA INTERFAZ ---
   Widget _tarjetaMeteoElectrica() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF263238), borderRadius: BorderRadius.circular(20), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4))]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Container(padding: const EdgeInsets.all(12), decoration: const BoxDecoration(color: Colors.white10, shape: BoxShape.circle), child: const Icon(Icons.thunderstorm, color: Colors.amberAccent, size: 28)), const SizedBox(width: 16), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("🌤️ RADAR METEO-ELÉCTRICO (MAÑANA)", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.2)), const SizedBox(height: 6), Text(_prediccionMeteo, style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.4))]))]), const SizedBox(height: 12), const Divider(color: Colors.white12), const SizedBox(height: 8), Text(_detallesMeteo, style: const TextStyle(color: Colors.white38, fontSize: 10, fontStyle: FontStyle.italic))]));
-  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass); final gCtrl = TextEditingController(text: _groqKey); String labelGroq = _groqKey.length >= 4 ? "Groq Key (Actual: ${_groqKey.substring(0, 4)}...)" : "Groq API Key (Opcional)"; return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "Email Iberdrola", border: OutlineInputBorder(), prefixIcon: Icon(Icons.email))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 16), TextField(controller: gCtrl, obscureText: true, decoration: InputDecoration(labelText: labelGroq, border: const OutlineInputBorder(), prefixIcon: const Icon(Icons.smart_toy, color: Colors.indigo))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); await prefs.setString('groq_key', gCtrl.text.trim()); setState(() { _email = eCtrl.text.trim(); _pass = pCtrl.text; _groqKey = gCtrl.text.trim(); _status = "Conectando..."; _showWebFallback = false; }); _webController?.loadUrl(urlRequest: URLRequest(url: WebUri('https://www.i-de.es/consumidores/web/login'))); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
+  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass); final gCtrl = TextEditingController(text: _groqKey); String labelGroq = _groqKey.length >= 4 ? "Groq Key (Actual: ${_groqKey.substring(0, 4)}...)" : "Groq API Key (Opcional)"; return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 16), TextField(controller: gCtrl, obscureText: true, decoration: InputDecoration(labelText: labelGroq, border: const OutlineInputBorder(), prefixIcon: const Icon(Icons.smart_toy, color: Colors.indigo))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); await prefs.setString('groq_key', gCtrl.text.trim()); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _groqKey = gCtrl.text.trim(); _status = "Conectando..."; _showWebFallback = false; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
   Widget _seccionEficiencia() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [ const Icon(Icons.check_circle_outline, color: Colors.blueGrey, size: 18), const SizedBox(width: 8), const Text("REGISTRO DE USO", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), ]), const SizedBox(height: 12), TextField(controller: _deviceCtrl, decoration: const InputDecoration(hintText: "Ej: Carga Leapmotor, Horno...", border: OutlineInputBorder(), prefixIcon: Icon(Icons.ev_station))), const SizedBox(height: 10), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _guardarRegistroAparato, icon: const Icon(Icons.save, color: Colors.black87), label: const Text("GUARDAR REGISTRO", style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), padding: const EdgeInsets.symmetric(vertical: 12)), ))])));
   Widget _tarjetaLogsAparatos() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Column(children: [Padding(padding: const EdgeInsets.all(12), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ const Text("HISTORIAL APARATOS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), Row(children: [ IconButton(icon: const Icon(Icons.download, size: 18, color: Colors.blueGrey), onPressed: _importarDatos, tooltip: "Importar JSON"), IconButton(icon: const Icon(Icons.upload, size: 18, color: Colors.blueGrey), onPressed: _exportarDatos, tooltip: "Exportar JSON"), ],) ])), const Divider(height: 1), Container(height: 150, child: _logsDispositivos.isEmpty ? const Center(child: Text("No hay registros.", style: TextStyle(color: Colors.grey))) : ListView.separated(itemCount: _logsDispositivos.length, separatorBuilder: (c, i) => const Divider(height: 1), itemBuilder: (c, i) { final log = _logsDispositivos[i]; final start = DateTime.parse(log['start']); return ListTile(leading: const Icon(Icons.history, color: Colors.blueGrey), title: Text(log['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text("${start.day}/${start.month} - ${start.hour.toString().padLeft(2,'0')}:${start.minute.toString().padLeft(2,'0')}"), trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18), onPressed: () { setState(() { _logsDispositivos.removeAt(i); }); _saveDeviceLogs(); }),); },),),]));
   Widget _tarjetaGraficoVisual() { double maxKwh = 0; for(var d in _desgloseDiario){ if(d['kwh']>maxKwh) maxKwh = d['kwh']; } return Container(padding: const EdgeInsets.all(16), height: 250, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text("CONSUMO DEL MES (kWh)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const SizedBox(height: 16), Expanded(child: BarChart(BarChartData(alignment: BarChartAlignment.spaceAround, maxY: maxKwh > 0 ? maxKwh * 1.2 : 5, barTouchData: BarTouchData(enabled: true, touchTooltipData: BarTouchTooltipData(getTooltipColor: (group) => Colors.black87, tooltipPadding: const EdgeInsets.all(8), tooltipMargin: 8, getTooltipItem: (group, groupIndex, rod, rodIndex) { return BarTooltipItem("${rod.toY.toStringAsFixed(2)} kWh", const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 14)); })), titlesData: FlTitlesData(show: true, bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 22, interval: 5, getTitlesWidget: (v, m) { if (v.toInt() % 5 != 0) return const SizedBox(); return Text(_desgloseDiario[v.toInt()]['fecha'].split('/')[0], style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.bold)); })), leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))), borderData: FlBorderData(show: false), gridData: FlGridData(show: false), barGroups: _desgloseDiario.asMap().entries.map((e) => BarChartGroupData(x: e.key, barRods: [BarChartRodData(toY: e.value['isFuture'] ? 0.05 : e.value['kwh'], color: e.value['isFuture'] ? Colors.grey.shade300 : const Color(0xFF00E5FF), width: 6, borderRadius: BorderRadius.circular(2), backDrawRodData: BackgroundBarChartRodData(show: true, toY: maxKwh > 0 ? maxKwh * 1.2 : 5, color: Colors.grey.shade100))])).toList() ))) ])); }
