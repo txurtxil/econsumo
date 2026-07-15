@@ -78,7 +78,7 @@ void callbackDispatcher() {
           } else {
             final token = rTok.body.trim();
             final rSup = await http.get(Uri.parse('https://datadis.es/api-private/api/get-supplies'),
-                headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+                headers: {'Authorization': 'Bearer $token', 'Accept': 'application/json'}).timeout(const Duration(seconds: 60));
             if (rSup.statusCode != 200) {
               errorMsg = 'get-supplies HTTP ${rSup.statusCode}';
             } else {
@@ -97,7 +97,7 @@ void callbackDispatcher() {
                 double kwh = 0.0; Map<String, double> kwhDia = {}; DateTime? ultimo;
                 for (final m in meses) {
                   final url = 'https://datadis.es/api-private/api/get-consumption-data?cups=$cups&distributorCode=$dist&startDate=$m&endDate=$m&measurementType=0&pointType=$pt';
-                  final rc = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 90));
+                  final rc = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token', 'Accept': 'application/json'}).timeout(const Duration(seconds: 90));
                   if (rc.statusCode != 200) { errorMsg = 'consumo $m HTTP ${rc.statusCode}'; continue; }
                   for (final e in (jsonDecode(utf8.decode(rc.bodyBytes)) as List)) {
                     try {
@@ -234,7 +234,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.0.1. Diagnóstico Datadis detallado.");
+    _addLog("eConsumo v37.0.2. Fix cabecera Accept (Datadis operativo).");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -246,6 +246,14 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   //   Doc: https://datadis.es  ·  Auth: NIF + contraseña Datadis
   // ============================================================
   static const String _kDatadisHost = 'https://datadis.es';
+
+  // IMPORTANTE: el paquete http de Dart NO envía cabecera Accept por defecto
+  // (curl sí manda Accept: */*). Sin ella, Datadis responde 400 "Parámetro en
+  // cabecera requerido en estado vacío". No quitar.
+  Map<String, String> _cabecerasDatadis(String token) => {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      };
 
   // Periodos 2.0TD: 1=punta, 2=llano, 3=valle. (Festivos nacionales
   // no contemplados: cuentan como laborable. Con Relax el precio es
@@ -275,7 +283,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<bool> _datadisSupplies(String token) async {
     try {
       final r = await http.get(Uri.parse('$_kDatadisHost/api-private/api/get-supplies'),
-          headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+          headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 60));
       if (r.statusCode != 200) { final b = r.body.trim(); _addLog("Datadis: get-supplies HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}"); return false; }
       final List d = jsonDecode(utf8.decode(r.bodyBytes));
       if (d.isEmpty) { _addLog("Datadis: no hay suministros asociados a tu NIF."); return false; }
@@ -302,7 +310,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
         '&startDate=$yyyyMM&endDate=$yyyyMM&measurementType=0&pointType=$_datadisPointType';
     try {
-      final r = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 90));
+      final r = await http.get(Uri.parse(url), headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 90));
       if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
       if (r.statusCode == 429) { _addLog("Datadis: $yyyyMM ya consultado en 24h (429). Usando lo que haya."); return []; }
       final b = r.body.trim(); _addLog("Datadis: consumo $yyyyMM HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}");
