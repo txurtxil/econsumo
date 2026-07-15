@@ -32,36 +32,10 @@ bool _esFestivoNacional(DateTime d) {
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     final prefs = await SharedPreferences.getInstance();
-    final String groqKey = prefs.getString('groq_key') ?? '';
     
     const AndroidInitializationSettings initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
     await flutterLocalNotificationsPlugin.initialize(const InitializationSettings(android: initAndroid));
 
-    if (task == "econsumo_charge_advisor") {
-        try {
-            DateTime target = DateTime.now();
-            if (target.hour > 20) target = target.add(const Duration(days: 1));
-            String sDate = "${target.year}-${target.month.toString().padLeft(2,'0')}-${target.day.toString().padLeft(2,'0')}";
-            final res = await http.get(Uri.parse("https://api.esios.ree.es/archives/70/download?date=$sDate"));
-            if (res.statusCode == 200) {
-                final j = jsonDecode(res.body);
-                List<dynamic> precios = j['PVPC'];
-                if (precios != null && precios.length >= 24) {
-                    List<double> pEU = precios.map((p) => double.parse(p['PCB'].toString().replaceAll(',', '.')) / 1000.0).toList();
-                    double minPrice = 999.0; int bestHour = 0;
-                    for(int i=0; i<8; i++) { if (pEU[i] < minPrice) { minPrice = pEU[i]; bestHour = i; } }
-                    String horaTexto = "${bestHour.toString().padLeft(2,'0')}:00"; String precioTexto = minPrice.toStringAsFixed(3);
-                    String mensajeAsistente = "Enchufa el Leapmotor a las $horaTexto. El precio caerá a $precioTexto €/kWh.";
-                    if (groqKey.isNotEmpty) {
-                        final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "system", "content": "Eres la IA del Leapmotor B10. Hablas con el conductor. Tienes 15 palabras máximo."}, {"role": "user", "content": "Informa al usuario que la mejor hora para cargar es a las $horaTexto a $precioTexto euros."} ], "temperature": 0.8, "max_completion_tokens": 50 }));
-                        if (r.statusCode == 200) mensajeAsistente = jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString().replaceAll('"', '').trim();
-                    }
-                    await flutterLocalNotificationsPlugin.show(100, "🔌 IA de Carga Leapmotor", mensajeAsistente, const NotificationDetails(android: AndroidNotificationDetails('ev_charge', 'Carga Vehículo', importance: Importance.max, priority: Priority.high, color: Color(0xFF00E5FF))));
-                }
-            }
-        } catch(e) {}
-        return Future.value(true);
-    }
 
     if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
         // Sincronización en 2º plano vía API oficial de Datadis (sin scraping).
@@ -168,24 +142,21 @@ void main() async {
   // saturar la API de Datadis y cualquier riesgo de bloqueo por accesos automáticos).
   Workmanager().cancelAll();
   final prefs = await SharedPreferences.getInstance();
-  runApp(MaterialApp(debugShowCheckedModeBanner: false, theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF00E5FF)), home: MainOrchestrator(savedEmail: prefs.getString('email') ?? '', savedPass: prefs.getString('pass') ?? '', savedGroq: prefs.getString('groq_key') ?? '')));
+  runApp(MaterialApp(debugShowCheckedModeBanner: false, theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF00E5FF)), home: MainOrchestrator(savedEmail: prefs.getString('email') ?? '', savedPass: prefs.getString('pass') ?? '')));
 }
 
 class MainOrchestrator extends StatefulWidget {
-  final String savedEmail; final String savedPass; final String savedGroq;
-  const MainOrchestrator({super.key, required this.savedEmail, required this.savedPass, required this.savedGroq});
+  final String savedEmail; final String savedPass;
+  const MainOrchestrator({super.key, required this.savedEmail, required this.savedPass});
   @override
   State<MainOrchestrator> createState() => _MainOrchestratorState();
 }
 
 class _MainOrchestratorState extends State<MainOrchestrator> {
-  late String _email; late String _pass; late String _groqKey;
+  late String _email; late String _pass;
   InAppWebViewController? _webController;
   bool _isLoggedIn = false; bool _showWebFallback = false;
   String _status = "Calculando Ciclo..."; 
-  String _consejoIA = "";
-  String _prediccionMeteo = "Sincronizando radares meteo-eléctricos...";
-  String _detallesMeteo = "...";
   
   double _kwhTotal = 0.0; double _kwhValle = 0.0; double _kwhLlano = 0.0; double _kwhPunta = 0.0;
   double _costeEnergia = 0.0; double _costePotencia = 0.0;
@@ -233,10 +204,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   final TextEditingController _deviceCtrl = TextEditingController();
   List<Map<String, dynamic>> _logsDispositivos = [];
-  double _baseWatts = 0.0; String _instantWatts = ""; bool _loadingPLC = false;
+
 
   final List<String> _logs = []; final ScrollController _logScrollController = ScrollController(); Timer? _rescueTimer;
-  List<Map<String, String>> _chatMessages = [];
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
   bool _conectando = false; String _cups = '';
@@ -246,11 +216,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   @override
   void initState() {
     super.initState();
-    _email = widget.savedEmail; _pass = widget.savedPass; _groqKey = widget.savedGroq;
+    _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.3.3. Día de ciclo accesible sin conectar.");
+    _addLog("eConsumo v38.0.0. Limpieza: sin Groq, sin meteo, sin PLC.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -594,46 +563,13 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   void _exportarDatos() { Clipboard.setData(ClipboardData(text: jsonEncode(_logsDispositivos))); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copiado en JSON'), backgroundColor: Colors.green)); }
   void _importarDatos() { TextEditingController importCtrl = TextEditingController(); showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text("Importar JSON"), content: TextField(controller: importCtrl, maxLines: 5, decoration: const InputDecoration(border: OutlineInputBorder())), actions: [ TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCELAR")), ElevatedButton(onPressed: () { try { List<dynamic> p = jsonDecode(importCtrl.text); setState(() { _logsDispositivos.addAll(p.cast<Map<String, dynamic>>()); _logsDispositivos.sort((a, b) => DateTime.parse(b['start']).compareTo(DateTime.parse(a['start']))); }); _saveDeviceLogs(); Navigator.pop(ctx); } catch(e) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error JSON'), backgroundColor: Colors.red)); } }, child: const Text("IMPORTAR")) ])); }
 
-  Future<void> _analizarMeteoElectrica() async {
-    try {
-      _addLog("Consultando Radares Meteo...");
-      final resViento = await http.get(Uri.parse("https://api.open-meteo.com/v1/forecast?latitude=41.65&longitude=-0.88&daily=wind_speed_10m_max&timezone=Europe%2FMadrid&forecast_days=2")).timeout(const Duration(seconds: 10));
-      final resSol = await http.get(Uri.parse("https://api.open-meteo.com/v1/forecast?latitude=37.38&longitude=-5.98&daily=cloud_cover_mean&timezone=Europe%2FMadrid&forecast_days=2")).timeout(const Duration(seconds: 10));
-      
-      if (resViento.statusCode == 200 && resSol.statusCode == 200) {
-        final jViento = jsonDecode(resViento.body); final jSol = jsonDecode(resSol.body);
-        num vientoManana = jViento['daily']['wind_speed_10m_max'][1] ?? 0; int nubesManana = jSol['daily']['cloud_cover_mean'][1] ?? 0;
-        _addLog("Meteo obtenida: $vientoManana km/h, $nubesManana% nubes.");
-        
-        setState(() { _detallesMeteo = "🌬️ Valle del Ebro (Zaragoza): $vientoManana km/h\n☀️ Valle del Guadalquivir (Sevilla): $nubesManana% Nubes"; });
-
-        String textoNativo = "";
-        if (vientoManana >= 20 && nubesManana <= 40) { textoNativo = "Día excelente: viento nocturno para carga barata y sol radiante para horas diurnas hundidas."; } 
-        else if (vientoManana >= 20) { textoNativo = "Vientos moderados/fuertes previstos. Eólica activa: madrugada propicia para cargar el Leapmotor a buen precio."; } 
-        else if (nubesManana <= 40) { textoNativo = "Poco viento, pero cielos despejados. Inyección solar masiva: carga a mediodía (14h-17h) para aprovechar horas valle."; } 
-        else { textoNativo = "Previsión de poca energía renovable en el mix eléctrico. Ojo, los precios indexados tenderán al alza."; }
-
-        if (!mounted) return;
-        setState(() { _prediccionMeteo = textoNativo; });
-        _sincronizarWidgetNativo();
-      } else {
-        if (!mounted) return; setState(() => _prediccionMeteo = "Radares no disponibles temporalmente.");
-      }
-    } catch(e) {
-      if (!mounted) return; setState(() => _prediccionMeteo = "Información meteorológica no disponible.");
-    }
-  }
 
   Future<void> _forzarRefrescoCompleto() async {
     _addLog("Refresco manual solicitado.");
     setState(() { _isLoggedIn = false; _status = "Refrescando..."; _desgloseDiario.clear(); _horasPorDia.clear(); _costeEnergia = 0.0; _kwhTotal = 0.0; _costeExactoFlexi = 0.0; });
-    setState(() => _prediccionMeteo = "Recalculando radares...");
-    _analizarMeteoElectrica();
     await _conectarAhora();
   }
 
-  Future<void> _leerPLC({bool isBaseMeasurement = false}) async { setState(() { _loadingPLC = true; _instantWatts = "..."; }); _addLog("Negociando PLC..."); try { var res = await _webController?.callAsyncJavaScript(functionBody: "async function runHandshake() { try { await fetch('/consumidores/rest/loginNew/mantenerSesion/'); await fetch('/consumidores/rest/escenarioNew/validarComunicacionContador/'); await fetch('/consumidores/rest/escenarioNew/nuevoEscenario/'); await new Promise(r => setTimeout(r, 6000)); let r = await fetch('/consumidores/rest/escenarioNew/obtenerMedicionOnline/24'); let data = await r.json(); return data.valMagnitud || 'ERROR'; } catch(e) { return 'REINTENTAR'; } } let val = await runHandshake(); if(val === 'REINTENTAR') { await new Promise(r => setTimeout(r, 3000)); return await runHandshake(); } return val;").timeout(const Duration(seconds: 25)); if (res?.value != null && res!.value.toString() != "ERROR") { double w = double.parse(res!.value.toString()); setState(() { _instantWatts = "${w.toStringAsFixed(0)} W"; if (isBaseMeasurement) _baseWatts = w; }); if (!isBaseMeasurement && _baseWatts > 0) { _consultarGroqEficiencia(w - _baseWatts); } } else { setState(() { _instantWatts = "Fallo PLC"; }); } } catch(e) { setState(() => _instantWatts = "Timeout"); } finally { setState(() => _loadingPLC = false); } }
-  Future<void> _consultarGroqEficiencia(double watios) async { if (_groqKey.isEmpty) return; String disp = _deviceCtrl.text.isEmpty ? "Este electrodoméstico" : _deviceCtrl.text; try { final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "user", "content": "Analiza: $disp consume $watios W. ¿Es normal? Responde corto."} ], "temperature": 1, "max_completion_tokens": 1024, "top_p": 1, "reasoning_effort": "medium" })); if (r.statusCode == 200) { String t = jsonDecode(utf8.decoder.convert(r.bodyBytes))['choices'][0]['message']['content']; ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("🤖 IA: $t"), backgroundColor: Colors.purple, duration: const Duration(seconds: 8))); } } catch(e) {} }
 
   void _recalcularCosteEnergia() { 
     if (_tarifaSeleccionada == 'PVPC (e-SIOS real)') { 
@@ -665,10 +601,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; 
       double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; 
       
-      String textoWidget = _tarifaSeleccionada == 'Octopus Relax'
-          ? "Precio fijo 24h: carga tu EV a cualquier hora, mismo coste."
-          : "Carga nocturna con tarifa indexada, ahorras y cuidas tu planeta.";
-      if (_consejoIA.isNotEmpty && !_consejoIA.contains("Analizando")) { textoWidget = "🔌 $_consejoIA"; }
+      const String textoWidget = "";
 
       // Últimos 7 días reales (no futuros) para la gráfica del widget: "dd/MM|kwh;dd/MM|kwh;..."
       String grafica = '';
@@ -689,15 +622,12 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                 _isLoggedIn = true; 
                 _status = "Calculando..."; 
                 _showWebFallback = false; 
-                _prediccionMeteo = _prediccionMeteo; 
-                _detallesMeteo = _detallesMeteo;
             }); 
             _actualizarDatos(); 
         } 
     } 
   }
 
-  Future<void> _consultarGroqIA() async { if (_groqKey.isEmpty || _topHoras.isEmpty) return; setState(() => _consejoIA = "Analizando consumo..."); try { String picos = _topHoras.map((h) => "${h['hora']}:00 (${h['kwh'].toStringAsFixed(1)}kWh)").join(", "); String contextoTarifa = _tarifaSeleccionada == 'Octopus Relax' ? "Su tarifa es Octopus Relax de PRECIO FIJO 24h (0,103 €/kWh): no hay horas más baratas, así que NO recomiendes horarios de carga; céntrate en hábitos, potencia contratada o eficiencia." : "Su tarifa es indexada: anímale sobre la carga en horas baratas."; final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "user", "content": "Usuario con coche Leapmotor eléctrico. $contextoTarifa Sus picos hoy son: $picos. Dale 1 consejo breve (10 palabras)."} ], "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setState(() { _consejoIA = jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString().replaceAll('"', '').trim(); }); _sincronizarWidgetNativo(); } } catch(e) {} }
 
   void _procesarCurvasHorarias(List<dynamic> horas) {
     if (horas.isEmpty) {
@@ -731,7 +661,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     List<Map<String,dynamic>> horasIndexed = []; for(int h = 0; h < 24; h++){ horasIndexed.add({'hora': h, 'kwh': sumByHour[h]}); } horasIndexed.sort((a,b) => b['kwh'].compareTo(a['kwh']));
     List<double> avgByHour = sumByHour.map((val) => val / diasRegistrados).toList();
     setState(() { _desgloseDiario = tempDiario; _horasPorDia = tempHorasPorDia; _topHoras = horasIndexed.take(3).toList(); _promedioPorHora = avgByHour; _costeExactoFlexi = costeFlexiTemp; });
-    _recalcularCosteEnergia(); _consultarGroqIA(); _calcularComparadorTarifas();
+    _recalcularCosteEnergia(); _calcularComparadorTarifas();
   }
 
   // Comparador: con el consumo horario REAL ya descargado, calcula cuánto
@@ -934,7 +864,6 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     } catch(e) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error obteniendo precios.'))); _addLog("Error Tickets: $e"); }
   }
 
-  void _abrirChatIA() { showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.white, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), builder: (context) => StatefulBuilder(builder: (BuildContext context, StateSetter setModalState) { TextEditingController txtCtrl = TextEditingController(); Future<void> enviarMensaje() async { if (txtCtrl.text.isEmpty) return; String userTxt = txtCtrl.text; txtCtrl.clear(); setModalState(() { _chatMessages.add({"role": "user", "msg": userTxt}); _chatMessages.add({"role": "ai", "msg": "Calculando con IA..."}); }); try { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; List msgs = [{"role": "system", "content": _tarifaSeleccionada == 'Octopus Relax' ? "Eres el Oráculo del Leapmotor B10. El usuario tiene tarifa Octopus Relax de PRECIO FIJO 24h (0,103 €/kWh): no hay horas más baratas, no recomiendes horarios; ayuda con hábitos, potencia y eficiencia." : "Eres el Oráculo del Leapmotor B10. Ayudas al usuario a optimizar su consumo eléctrico en casa y en el coche con tarifa indexada Octopus Flexi."}, {"role": "user", "content": "Usuario gastó ${totalEuros.toStringAsFixed(2)}€ hasta hoy en el ciclo."}]; for(var m in _chatMessages) { if(m['msg'] != "Calculando con IA...") msgs.add({"role": m['role'] == "user" ? "user" : "assistant", "content": m['msg']}); } final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": msgs, "temperature": 0.8, "max_completion_tokens": 1024 })); if (r.statusCode == 200) { setModalState(() { _chatMessages.last = {"role": "ai", "msg": jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'].toString()}; }); } } catch(e) {} } return Padding(padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom), child: Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(children: [const Text("Oráculo del Leapmotor", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))), const Divider(), Expanded(child: ListView.builder(itemCount: _chatMessages.length, itemBuilder: (c, i) { bool isUser = _chatMessages[i]['role'] == 'user'; return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: isUser ? const Color(0xFF00E5FF) : Colors.cyan.shade50, borderRadius: BorderRadius.circular(16)), child: Text(_chatMessages[i]['msg']!, style: TextStyle(color: isUser ? Colors.black87 : Colors.black87, fontWeight: isUser ? FontWeight.normal : FontWeight.w500)))); })), Row(children: [ Expanded(child: TextField(controller: txtCtrl, decoration: InputDecoration(hintText: "Pregunta...", border: OutlineInputBorder(borderRadius: BorderRadius.circular(20))))), IconButton(icon: const Icon(Icons.send, color: Color(0xFF00E5FF)), onPressed: enviarMensaje) ]) ]))); })); }
 
   Widget _tarjetaDinero() { 
     double total = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; 
@@ -1005,11 +934,19 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                     
                     _bannerEstadoSync(), const SizedBox(height: 12),
                     _tarjetaDinero(), const SizedBox(height: 16),
+                    // BOTONES DE TICKETS
+                    if (_desgloseDiario.isNotEmpty) Row(children: [
+                        Expanded(child: ElevatedButton.icon(onPressed: _mostrarTicketGenerado, icon: const Icon(Icons.calendar_today, color: Colors.white, size: 14), label: const Text("T. DÍAS", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))), 
+                        const SizedBox(width: 8), 
+                        Expanded(child: ElevatedButton.icon(onPressed: _seleccionarDiaParaTicket24h, icon: const Icon(Icons.access_time, color: Colors.black87, size: 14), label: const Text("T. HORAS", style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))),
+                        const SizedBox(width: 8), 
+                        Expanded(child: ElevatedButton.icon(onPressed: _generarTicketPreciosHoy, icon: const Icon(Icons.euro, color: Colors.white, size: 14), label: const Text("PRECIOS", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo.shade600, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))))
+                    ]) ,
+                    const SizedBox(height: 24),
                     _tarjetaDesglose(), const SizedBox(height: 16),
                     _tarjetaComparadorTarifas(), const SizedBox(height: 16),
                     _tarjetaCNMC(), const SizedBox(height: 16),
 
-                    _tarjetaMeteoElectrica(), const SizedBox(height: 16),
                     
                     // AVISO INTELIGENTE SI I-DE ESTÁ RETRASADO
                     if (_desgloseDiario.isEmpty && !_status.contains("Calculando") && !_status.contains("bóveda")) 
@@ -1028,18 +965,8 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                           )
                       ),
                     
-                    // BOTONES DE TICKETS
-                    if (_desgloseDiario.isNotEmpty) Row(children: [
-                        Expanded(child: ElevatedButton.icon(onPressed: _mostrarTicketGenerado, icon: const Icon(Icons.calendar_today, color: Colors.white, size: 14), label: const Text("T. DÍAS", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))), 
-                        const SizedBox(width: 8), 
-                        Expanded(child: ElevatedButton.icon(onPressed: _seleccionarDiaParaTicket24h, icon: const Icon(Icons.access_time, color: Colors.black87, size: 14), label: const Text("T. HORAS", style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))),
-                        const SizedBox(width: 8), 
-                        Expanded(child: ElevatedButton.icon(onPressed: _generarTicketPreciosHoy, icon: const Icon(Icons.euro, color: Colors.white, size: 14), label: const Text("PRECIOS", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo.shade600, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))))
-                    ]) ,
-                    const SizedBox(height: 24),
 
-                    _tarjetaPrediccionCompactaConChat(), const SizedBox(height: 16),
-                    if(_consejoIA.isNotEmpty) ...[_tarjetaGroqIA(), const SizedBox(height: 16)], 
+                    _tarjetaPrediccion(), const SizedBox(height: 16),
                     
                     _tarjetaInfoFlexi(), const SizedBox(height: 24),
 
@@ -1048,14 +975,13 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                     if (_topHoras.isNotEmpty) ...[ _tarjetaPerfilHorario(), const SizedBox(height: 24), ],
 
                     const Text("  HERRAMIENTAS DE ANÁLISIS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12, letterSpacing: 1.2)), const SizedBox(height: 8),
-                    _seccionEficiencia(), const SizedBox(height: 16), 
                     _tarjetaLogsAparatos(), const SizedBox(height: 16),
                   ]))
                 ]
               ],
             ),
           ),
-          Container(height: 120, width: double.infinity, color: Colors.black, padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("> TERMINAL SNIFFER", style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold)), Row(children: [IconButton(icon: const Icon(Icons.copy, color: Colors.white, size: 20), onPressed: _copiarLog), if (_email.isNotEmpty) ElevatedButton(onPressed: () => setState(() => _showWebFallback = !_showWebFallback), style: ElevatedButton.styleFrom(backgroundColor: Colors.red, minimumSize: const Size(60, 25)), child: Text(_showWebFallback ? "OCULTAR WEB" : "VER WEB", style: const TextStyle(fontSize: 9, color: Colors.white)))])]), Expanded(child: ListView.builder(controller: _logScrollController, itemCount: _logs.length, itemBuilder: (c, i) => Text(_logs[i], style: TextStyle(color: _logs[i].contains("Error") || _logs[i].contains("Fallo") || _logs[i].contains("WU1") ? Colors.redAccent : Colors.white70, fontSize: 10, fontFamily: 'monospace'))))]))
+          Container(height: 120, width: double.infinity, color: Colors.black, padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("> TERMINAL SNIFFER", style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.copy, color: Colors.white, size: 20), onPressed: _copiarLog)]), Expanded(child: ListView.builder(controller: _logScrollController, itemCount: _logs.length, itemBuilder: (c, i) => Text(_logs[i], style: TextStyle(color: _logs[i].contains("Error") || _logs[i].contains("Fallo") || _logs[i].contains("WU1") ? Colors.redAccent : Colors.white70, fontSize: 10, fontFamily: 'monospace'))))]))
         ],
       ),
     );
@@ -1216,17 +1142,14 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     );
   }
 
+  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass);  return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _status = "Conectando..."; _showWebFallback = false; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
+  Widget _tarjetaDesglose() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("TICKET DE COMPRA", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const Divider(), _filaDesglose("Energía Consumida", _costeEnergia, true), Padding(padding: const EdgeInsets.only(left: 16, bottom: 8), child: Row(children: [Text("${_kwhTotal.toStringAsFixed(1)} kWh procesados", style: const TextStyle(color: Colors.grey, fontSize: 11))])), _filaDesglose("Potencia Fija", _costePotencia, false), _filaDesglose("Gestión y Extras", _cuotaOctopus, false), const Divider(), _filaDesglose("Impuestos (IVA + IE)", ((_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva) - (_costeEnergia + _costePotencia + _cuotaOctopus), false)]));
   // --- WIDGETS RESTANTES DE LA INTERFAZ ---
-  Widget _tarjetaMeteoElectrica() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF263238), borderRadius: BorderRadius.circular(20), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4))]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Container(padding: const EdgeInsets.all(12), decoration: const BoxDecoration(color: Colors.white10, shape: BoxShape.circle), child: const Icon(Icons.thunderstorm, color: Colors.amberAccent, size: 28)), const SizedBox(width: 16), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("🌤️ RADAR METEO-ELÉCTRICO (MAÑANA)", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.2)), const SizedBox(height: 6), Text(_prediccionMeteo, style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.4))]))]), const SizedBox(height: 12), const Divider(color: Colors.white12), const SizedBox(height: 8), Text(_detallesMeteo, style: const TextStyle(color: Colors.white38, fontSize: 10, fontStyle: FontStyle.italic))]));
-  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass); final gCtrl = TextEditingController(text: _groqKey); String labelGroq = _groqKey.length >= 4 ? "Groq Key (Actual: ${_groqKey.substring(0, 4)}...)" : "Groq API Key (Opcional)"; return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 16), TextField(controller: gCtrl, obscureText: true, decoration: InputDecoration(labelText: labelGroq, border: const OutlineInputBorder(), prefixIcon: const Icon(Icons.smart_toy, color: Colors.indigo))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); await prefs.setString('groq_key', gCtrl.text.trim()); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _groqKey = gCtrl.text.trim(); _status = "Conectando..."; _showWebFallback = false; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
-  Widget _seccionEficiencia() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [ const Icon(Icons.check_circle_outline, color: Colors.blueGrey, size: 18), const SizedBox(width: 8), const Text("REGISTRO DE USO", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), ]), const SizedBox(height: 12), TextField(controller: _deviceCtrl, decoration: const InputDecoration(hintText: "Ej: Carga Leapmotor, Horno...", border: OutlineInputBorder(), prefixIcon: Icon(Icons.ev_station))), const SizedBox(height: 10), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _guardarRegistroAparato, icon: const Icon(Icons.save, color: Colors.black87), label: const Text("GUARDAR REGISTRO", style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), padding: const EdgeInsets.symmetric(vertical: 12)), ))])));
   Widget _tarjetaLogsAparatos() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Column(children: [Padding(padding: const EdgeInsets.all(12), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ const Text("HISTORIAL APARATOS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), Row(children: [ IconButton(icon: const Icon(Icons.download, size: 18, color: Colors.blueGrey), onPressed: _importarDatos, tooltip: "Importar JSON"), IconButton(icon: const Icon(Icons.upload, size: 18, color: Colors.blueGrey), onPressed: _exportarDatos, tooltip: "Exportar JSON"), ],) ])), const Divider(height: 1), Container(height: 150, child: _logsDispositivos.isEmpty ? const Center(child: Text("No hay registros.", style: TextStyle(color: Colors.grey))) : ListView.separated(itemCount: _logsDispositivos.length, separatorBuilder: (c, i) => const Divider(height: 1), itemBuilder: (c, i) { final log = _logsDispositivos[i]; final start = DateTime.parse(log['start']); return ListTile(leading: const Icon(Icons.history, color: Colors.blueGrey), title: Text(log['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text("${start.day}/${start.month} - ${start.hour.toString().padLeft(2,'0')}:${start.minute.toString().padLeft(2,'0')}"), trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18), onPressed: () { setState(() { _logsDispositivos.removeAt(i); }); _saveDeviceLogs(); }),); },),),]));
   Widget _tarjetaGraficoVisual() { double maxKwh = 0; for(var d in _desgloseDiario){ if(d['kwh']>maxKwh) maxKwh = d['kwh']; } return Container(padding: const EdgeInsets.all(16), height: 250, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text("CONSUMO DEL MES (kWh)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const SizedBox(height: 16), Expanded(child: BarChart(BarChartData(alignment: BarChartAlignment.spaceAround, maxY: maxKwh > 0 ? maxKwh * 1.2 : 5, barTouchData: BarTouchData(enabled: true, touchTooltipData: BarTouchTooltipData(getTooltipColor: (group) => Colors.black87, tooltipPadding: const EdgeInsets.all(8), tooltipMargin: 8, getTooltipItem: (group, groupIndex, rod, rodIndex) { return BarTooltipItem("${rod.toY.toStringAsFixed(2)} kWh", const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 14)); })), titlesData: FlTitlesData(show: true, bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 22, interval: 5, getTitlesWidget: (v, m) { if (v.toInt() % 5 != 0) return const SizedBox(); return Text(_desgloseDiario[v.toInt()]['fecha'].split('/')[0], style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.bold)); })), leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))), borderData: FlBorderData(show: false), gridData: FlGridData(show: false), barGroups: _desgloseDiario.asMap().entries.map((e) => BarChartGroupData(x: e.key, barRods: [BarChartRodData(toY: e.value['isFuture'] ? 0.05 : e.value['kwh'], color: e.value['isFuture'] ? Colors.grey.shade300 : const Color(0xFF00E5FF), width: 6, borderRadius: BorderRadius.circular(2), backDrawRodData: BackgroundBarChartRodData(show: true, toY: maxKwh > 0 ? maxKwh * 1.2 : 5, color: Colors.grey.shade100))])).toList() ))) ])); }
   Widget _tarjetaGraficoHorario() { double maxKwh = 0; for(var d in _promedioPorHora){ if(d>maxKwh) maxKwh = d; } return Container(padding: const EdgeInsets.all(16), height: 250, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text("PERFIL HORARIO MEDIO (kWh)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const SizedBox(height: 16), Expanded(child: LineChart(LineChartData(lineBarsData: [LineChartBarData(spots: _promedioPorHora.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value)).toList(), isCurved: true, color: Colors.indigoAccent, barWidth: 3, isStrokeCapRound: true, belowBarData: BarAreaData(show: true, color: Colors.indigoAccent.withOpacity(0.2)))], titlesData: FlTitlesData(show: true, bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, interval: 6, reservedSize: 22, getTitlesWidget: (v, m) { if (v.toInt() % 6 != 0) return const SizedBox(); return Text("${v.toInt()}h", style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.bold)); })), leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))), borderData: FlBorderData(show: false), gridData: FlGridData(show: false), lineTouchData: LineTouchData(enabled: true, touchTooltipData: LineTouchTooltipData(getTooltipColor: (group) => Colors.black87, getTooltipItems: (spots) => spots.map((s) => LineTooltipItem("${s.x.toInt()}h: ${s.y.toStringAsFixed(3)} kWh", const TextStyle(color: Colors.indigoAccent, fontWeight: FontWeight.bold))).toList())) ))) ])); }
-  Widget _tarjetaGroqIA() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF00C6FF), Color(0xFF0072FF)]), borderRadius: BorderRadius.circular(20)), child: Row(children: [const Icon(Icons.psychology, color: Colors.white, size: 40), const SizedBox(width: 16), Expanded(child: Text(_consejoIA, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13, fontStyle: FontStyle.italic)))]));
-  Widget _tarjetaDesglose() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("TICKET DE COMPRA", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const Divider(), _filaDesglose("Energía Consumida", _costeEnergia, true), Padding(padding: const EdgeInsets.only(left: 16, bottom: 8), child: Row(children: [Text("${_kwhTotal.toStringAsFixed(1)} kWh procesados", style: const TextStyle(color: Colors.grey, fontSize: 11))])), _filaDesglose("Potencia Fija", _costePotencia, false), _filaDesglose("Gestión y Extras", _cuotaOctopus, false), const Divider(), _filaDesglose("Impuestos (IVA + IE)", ((_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva) - (_costeEnergia + _costePotencia + _cuotaOctopus), false)]));
   Widget _tarjetaPerfilHorario() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.insights, size: 16, color: Colors.blueGrey), SizedBox(width: 8), Text("TUS PICOS DE CONSUMO (HORAS)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12))]), const Divider(), for (int i = 0; i < _topHoras.length; i++) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("${i+1}. Hora: ${_topHoras[i]['hora'].toString().padLeft(2,'0')}:00 - ${_topHoras[i]['hora']+1}:00", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)), Text("${_topHoras[i]['kwh'].toStringAsFixed(1)} kWh", style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))]))]));
   Widget _filaDesglose(String t, double c, bool b) => Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(t, style: TextStyle(fontWeight: b ? FontWeight.bold : FontWeight.normal)), Text("${c.toStringAsFixed(2)} €", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))]));
-  Widget _tarjetaPrediccionCompactaConChat() { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; return Card(color: Colors.white, elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.indigo.shade200)), child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [const Icon(Icons.trending_up, color: Colors.indigo, size: 24), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text("PREDICCIÓN FIN DE CICLO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)), Text("${pred.toStringAsFixed(2)} €", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.indigo)),],),],), if (_groqKey.isNotEmpty) GestureDetector(onTap: _abrirChatIA, child: Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: Color(0xFF00E5FF), shape: BoxShape.circle), child: const Icon(Icons.electric_car, color: Colors.black87, size: 20),),)],),),); }
+  Widget _tarjetaPrediccion() { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; return Card(color: Colors.white, elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.indigo.shade200)), child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [const Icon(Icons.trending_up, color: Colors.indigo, size: 24), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text("PREDICCIÓN FIN DE CICLO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)), Text("${pred.toStringAsFixed(2)} €", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.indigo)),],),],)],),),); }
   Widget _tarjetaInfoFlexi() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFFE0F7FA), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5)), borderRadius: BorderRadius.circular(20)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.ev_station, color: Colors.indigo, size: 20), SizedBox(width: 8), Text("Estrategia Leapmotor + Flexi", style: TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold, fontSize: 14))]), const SizedBox(height: 12), const Text("El sistema ahora evalúa tu histórico al milímetro. Recuerda: para llenar los 67.2kWh de tu Leapmotor al precio más barato, carga de 00:00 a 08:00 o los fines de semana.", style: TextStyle(fontSize: 12, color: Colors.black87)), const SizedBox(height: 8), const Text("ℹ️ El mercado OMIE subasta la luz a las 12:00h y los precios definitivos para el día siguiente se publican en E-SIOS a partir de las 20:30h.", style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.blueGrey)), const SizedBox(height: 16), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _imprimirMasterPlanEV, icon: const Icon(Icons.print, color: Colors.white), label: const Text("IMPRIMIR MASTERPLAN", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, padding: const EdgeInsets.symmetric(vertical: 12))))]));
 }
