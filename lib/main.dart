@@ -210,9 +210,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   String _tarifaSeleccionada = 'Octopus Relax';
   int _diasCalculo = 0;
   final Map<String, Map<String, double>> _tarifasSimulator = { 
-    // Energía todo incluido (peaje + cargos + margen), sin impuestos.
-    // Flexi: precios REALES de la factura Octopus 23/05-15/06/2026.
-    'Octopus Flexi': {'p': 0.181, 'l': 0.104, 'v': 0.089},
+    // Energía todo incluido (peaje + cargos + margen), SIN impuestos.
+    // Flexi: precios publicados por Octopus a 15/07/2026 (0,272/0,191/0,172
+    // con impuestos ÷ 1,2719). OJO: Flexi es INDEXADA y cambia cada mes;
+    // en la factura de junio eran 0,181/0,104/0,089 (mercado más barato).
+    'Octopus Flexi': {'p': 0.214, 'l': 0.150, 'v': 0.135},
     'Octopus Relax': {'p': kPrecioUnicoKwh, 'l': kPrecioUnicoKwh, 'v': kPrecioUnicoKwh}, 
     'Oct. 3 Periodos': {'p': 0.162, 'l': 0.114, 'v': 0.076}, 
     'Iberdrola Noche': {'p': 0.205, 'l': 0.205, 'v': 0.108},
@@ -248,7 +250,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.3.0. Comparador de factura completa.");
+    _addLog("eConsumo v37.3.1. Precios Flexi actualizados a 15/07/2026.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
