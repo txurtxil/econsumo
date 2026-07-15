@@ -250,7 +250,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.3.1. Precios Flexi actualizados a 15/07/2026.");
+    _addLog("eConsumo v37.3.3. Día de ciclo accesible sin conectar.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -387,8 +387,12 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
     // Un solo rango de meses = una sola consulta (la cuota de Datadis es por consulta/24h)
     final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
+    // Datadis rechaza meses futuros: el mes final nunca puede pasar del actual.
+    final DateTime hoy = DateTime.now();
+    DateTime finReal = _cycleEnd.isAfter(hoy) ? hoy : _cycleEnd;
+    if (finReal.isBefore(_cycleStart)) finReal = _cycleStart;
     final String mesIni = "${_cycleStart.year}/${_cycleStart.month.toString().padLeft(2, '0')}";
-    final String mesFin = "${_cycleEnd.year}/${_cycleEnd.month.toString().padLeft(2, '0')}";
+    final String mesFin = "${finReal.year}/${finReal.month.toString().padLeft(2, '0')}";
 
     if (mounted) setState(() => _status = "Descargando $mesIni a $mesFin...");
     _addLog("Datadis: pidiendo consumo $mesIni → $mesFin...");
@@ -468,6 +472,14 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         icon: const Icon(Icons.sync),
         label: const Text("CONECTAR Y ACTUALIZAR"),
         style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14), textStyle: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      const SizedBox(height: 12),
+      // Botón de día de corte también AQUÍ: si el ciclo está mal configurado la
+      // conexión falla, y sin este botón no habría forma de arreglarlo.
+      OutlinedButton.icon(
+        onPressed: _cambiarDiaCorte,
+        icon: const Icon(Icons.edit_calendar, size: 18),
+        label: Text("Ciclo: día $DIA_CORTE_OCTOPUS de cada mes", style: const TextStyle(fontSize: 12)),
       ),
       const SizedBox(height: 12),
       const Text("Los datos se descargan de Datadis solo cuando tú lo pides. No hay conexión automática.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
