@@ -5,7 +5,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@drawable/widget_background"
-    android:padding="12dp">
+    android:padding="8dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -19,17 +19,20 @@
             android:layout_weight="1"
             android:text="eConsumo IA"
             android:textColor="#00E5FF"
-            android:textSize="13sp"
-            android:textStyle="bold" />
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
 
         <TextView
             android:id="@+id/widget_periodo"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Ahora: --"
+            android:text="--"
             android:textColor="#4CAF50"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:maxLines="1" />
     </LinearLayout>
 
     <TextView
@@ -38,12 +41,13 @@
         android:layout_height="wrap_content"
         android:text="Ciclo"
         android:textColor="#B0BEC5"
-        android:textSize="11sp" />
+        android:textSize="9sp"
+        android:maxLines="1"
+        android:ellipsize="end" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
         android:orientation="horizontal"
         android:baselineAligned="true">
 
@@ -53,36 +57,42 @@
             android:layout_height="wrap_content"
             android:text="-- €"
             android:textColor="#FFFFFF"
-            android:textSize="26sp"
-            android:textStyle="bold" />
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:maxLines="1" />
 
         <TextView
             android:id="@+id/widget_kwh"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
             android:text="-- kWh"
             android:textColor="#B0BEC5"
-            android:textSize="13sp" />
+            android:textSize="11sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/widget_prediccion"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
         android:text=""
         android:textColor="#80DEEA"
-        android:textSize="13sp"
-        android:textStyle="bold" />
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:maxLines="1"
+        android:ellipsize="end" />
 
     <ImageView
         android:id="@+id/widget_grafica"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="4dp"
         android:scaleType="fitXY"
+        android:adjustViewBounds="true"
         android:contentDescription="Consumo diario" />
 
 </LinearLayout>

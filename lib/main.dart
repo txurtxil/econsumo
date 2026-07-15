@@ -151,7 +151,7 @@ void callbackDispatcher() {
         } else {
           if (errorMsg.isEmpty) errorMsg = 'Fallo desconocido en sync Datadis';
           await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|$errorMsg');
-          Workmanager().registerOneOffTask("retry_${DateTime.now().millisecondsSinceEpoch}", "retry_sync_diario", initialDelay: const Duration(minutes: 60), constraints: Constraints(networkType: NetworkType.connected));
+          // Sin reintento automático: el usuario reconecta a mano cuando quiera.
         }
         return Future.value(success);
     }
@@ -164,8 +164,9 @@ void main() async {
   const AndroidInitializationSettings initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
   await flutterLocalNotificationsPlugin.initialize(const InitializationSettings(android: initAndroid));
   Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
-  Workmanager().registerPeriodicTask("sync_diario", "fetchConsumoTask", frequency: const Duration(hours: 12), constraints: Constraints(networkType: NetworkType.connected));
-  Workmanager().registerPeriodicTask("oraculo_carga", "econsumo_charge_advisor", frequency: const Duration(hours: 6), constraints: Constraints(networkType: NetworkType.connected));
+  // Sin sincronización automática: el usuario decide cuándo conectar (evita
+  // saturar la API de Datadis y cualquier riesgo de bloqueo por accesos automáticos).
+  Workmanager().cancelAll();
   final prefs = await SharedPreferences.getInstance();
   runApp(MaterialApp(debugShowCheckedModeBanner: false, theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF00E5FF)), home: MainOrchestrator(savedEmail: prefs.getString('email') ?? '', savedPass: prefs.getString('pass') ?? '', savedGroq: prefs.getString('groq_key') ?? '')));
 }
@@ -234,7 +235,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.0.2. Fix cabecera Accept (Datadis operativo).");
+    _addLog("eConsumo v37.1.0. Solo conexión manual. Widget redimensionable.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -425,7 +426,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14), textStyle: const TextStyle(fontWeight: FontWeight.bold)),
       ),
       const SizedBox(height: 12),
-      const Text("Los datos se descargan de Datadis, la plataforma oficial de las distribuidoras.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
+      const Text("Los datos se descargan de Datadis solo cuando tú lo pides. No hay conexión automática.", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center),
     ])));
   }
 
@@ -999,14 +1000,16 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Widget _bannerEstadoSync() {
     if (_lastSyncTime == null && _lastSyncError == null) return const SizedBox.shrink();
     Duration? diff = _lastSyncTime != null ? DateTime.now().difference(_lastSyncTime!) : null;
-    bool stale = diff == null || diff.inHours >= 13;
+    bool stale = diff == null || diff.inHours >= 36;
     String texto;
     if (_lastSyncTime == null) {
-      texto = "Sin sincronización automática registrada todavía.";
+      texto = "Sin datos descargados todavía.";
     } else if (diff!.inMinutes < 60) {
-      texto = "Última actualización automática: hace ${diff.inMinutes} min.";
+      texto = "Datos descargados hace ${diff.inMinutes} min.";
+    } else if (diff.inHours < 48) {
+      texto = "Datos descargados hace ${diff.inHours} h.";
     } else {
-      texto = "Última actualización automática: hace ${diff.inHours} h.";
+      texto = "Datos descargados hace ${diff.inDays} días.";
     }
     return Container(
       padding: const EdgeInsets.all(12),
