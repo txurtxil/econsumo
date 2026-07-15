@@ -234,7 +234,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.0.0. Datos vía API oficial de Datadis.");
+    _addLog("eConsumo v37.0.1. Diagnóstico Datadis detallado.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -264,8 +264,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: {'username': _email, 'password': _pass},
       ).timeout(const Duration(seconds: 30));
-      if (r.statusCode == 200 && r.body.trim().isNotEmpty) return r.body.trim();
-      _addLog("Datadis: login rechazado (HTTP ${r.statusCode}).");
+      final cuerpo = r.body.trim();
+      if (r.statusCode == 200 && cuerpo.startsWith('eyJ')) { _addLog("Datadis: token JWT válido (${cuerpo.length} chars)."); return cuerpo; }
+      if (r.statusCode == 200) { _addLog("Datadis: HTTP 200 pero el cuerpo NO es un JWT → ${cuerpo.substring(0, cuerpo.length > 120 ? 120 : cuerpo.length)}"); return null; }
+      _addLog("Datadis: login HTTP ${r.statusCode} → ${cuerpo.substring(0, cuerpo.length > 160 ? 160 : cuerpo.length)}");
     } catch (e) { _addLog("Datadis: error de red en login → $e"); }
     return null;
   }
@@ -274,7 +276,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     try {
       final r = await http.get(Uri.parse('$_kDatadisHost/api-private/api/get-supplies'),
           headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
-      if (r.statusCode != 200) { _addLog("Datadis: get-supplies HTTP ${r.statusCode}."); return false; }
+      if (r.statusCode != 200) { final b = r.body.trim(); _addLog("Datadis: get-supplies HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}"); return false; }
       final List d = jsonDecode(utf8.decode(r.bodyBytes));
       if (d.isEmpty) { _addLog("Datadis: no hay suministros asociados a tu NIF."); return false; }
       Map s = d.first;
@@ -303,7 +305,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       final r = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 90));
       if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
       if (r.statusCode == 429) { _addLog("Datadis: $yyyyMM ya consultado en 24h (429). Usando lo que haya."); return []; }
-      _addLog("Datadis: consumo $yyyyMM → HTTP ${r.statusCode}.");
+      final b = r.body.trim(); _addLog("Datadis: consumo $yyyyMM HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}");
     } catch (e) { _addLog("Datadis: error consumo $yyyyMM → $e"); }
     return [];
   }
