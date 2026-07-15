@@ -210,10 +210,23 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   String _tarifaSeleccionada = 'Octopus Relax';
   int _diasCalculo = 0;
   final Map<String, Map<String, double>> _tarifasSimulator = { 
-    'Octopus Flexi Live': {'p': 0.0, 'l': 0.0, 'v': 0.0},
+    // Energía todo incluido (peaje + cargos + margen), sin impuestos.
+    // Flexi: precios REALES de la factura Octopus 23/05-15/06/2026.
+    'Octopus Flexi': {'p': 0.181, 'l': 0.104, 'v': 0.089},
     'Octopus Relax': {'p': kPrecioUnicoKwh, 'l': kPrecioUnicoKwh, 'v': kPrecioUnicoKwh}, 
     'Oct. 3 Periodos': {'p': 0.162, 'l': 0.114, 'v': 0.076}, 
-    'Iberdrola Noche': {'p': 0.205, 'l': 0.205, 'v': 0.108} 
+    'Iberdrola Noche': {'p': 0.205, 'l': 0.205, 'v': 0.108},
+    'PVPC (e-SIOS real)': {'p': 0.0, 'l': 0.0, 'v': 0.0},
+  };
+
+  // Potencia (€/kW/día) y otros fijos (€/día). AQUÍ está la trampa del €/kWh:
+  // Relax cobra 0,093 en P1 y P2; Flexi 0,076 y 0,002 (mucho más barato).
+  final Map<String, Map<String, double>> _terminosFijos = {
+    'Octopus Flexi':      {'potP1': 0.076, 'potP2': 0.002, 'extraDia': 0.169},
+    'Octopus Relax':      {'potP1': 0.093, 'potP2': 0.093, 'extraDia': 0.05726},
+    'Oct. 3 Periodos':    {'potP1': 0.093, 'potP2': 0.093, 'extraDia': 0.05726},
+    'Iberdrola Noche':    {'potP1': 0.104, 'potP2': 0.011, 'extraDia': 0.05726},
+    'PVPC (e-SIOS real)': {'potP1': 0.076, 'potP2': 0.002, 'extraDia': 0.05726},
   };
 
   final TextEditingController _deviceCtrl = TextEditingController();
@@ -235,7 +248,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.2.0. Caché de consumos (evita el límite 429).");
+    _addLog("eConsumo v37.3.0. Comparador de factura completa.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -609,7 +622,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<void> _consultarGroqEficiencia(double watios) async { if (_groqKey.isEmpty) return; String disp = _deviceCtrl.text.isEmpty ? "Este electrodoméstico" : _deviceCtrl.text; try { final r = await http.post(Uri.parse('https://api.groq.com/openai/v1/chat/completions'), headers: { 'Authorization': 'Bearer $_groqKey', 'Content-Type': 'application/json' }, body: jsonEncode({ "model": "openai/gpt-oss-120b", "messages": [ {"role": "user", "content": "Analiza: $disp consume $watios W. ¿Es normal? Responde corto."} ], "temperature": 1, "max_completion_tokens": 1024, "top_p": 1, "reasoning_effort": "medium" })); if (r.statusCode == 200) { String t = jsonDecode(utf8.decoder.convert(r.bodyBytes))['choices'][0]['message']['content']; ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("🤖 IA: $t"), backgroundColor: Colors.purple, duration: const Duration(seconds: 8))); } } catch(e) {} }
 
   void _recalcularCosteEnergia() { 
-    if (_tarifaSeleccionada == 'Octopus Flexi Live') { 
+    if (_tarifaSeleccionada == 'PVPC (e-SIOS real)') { 
         setState(() { _costeEnergia = _costeExactoFlexi; }); 
     } else if (_tarifaSeleccionada == 'Octopus Relax') {
         // Precio único 24h: el desglose P/L/V se mantiene solo como estadística.
@@ -625,17 +638,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   // Potencia + costes regulados según la tarifa activa.
   void _aplicarCostesFijos() {
     if (_diasCalculo <= 0) return;
-    if (_tarifaSeleccionada == 'Octopus Relax') {
-      setState(() {
-        _costePotencia = (kPotenciaP1 + kPotenciaP2) * kPrecioPotenciaDia * _diasCalculo;
-        _cuotaOctopus = (kBonoSocialDia + kAlquilerContadorDia) * _diasCalculo;
-      });
-    } else {
-      setState(() {
-        _costePotencia = ((4.4 * 0.076) + (5.7 * 0.002)) * _diasCalculo;
-        _cuotaOctopus = (0.123 + 0.019 + 0.027) * _diasCalculo;
-      });
-    }
+    final fijos = _terminosFijos[_tarifaSeleccionada] ?? _terminosFijos['Octopus Relax']!;
+    setState(() {
+      _costePotencia = ((kPotenciaP1 * fijos['potP1']!) + (kPotenciaP2 * fijos['potP2']!)) * _diasCalculo;
+      _cuotaOctopus = fijos['extraDia']! * _diasCalculo;
+    });
   }
   
   Future<void> _sincronizarWidgetNativo() async { 
@@ -715,27 +722,41 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   // Comparador: con el consumo horario REAL ya descargado, calcula cuánto
   // habría costado la energía (sin potencia/impuestos) con cada tarifa.
+  // Comparador de FACTURA COMPLETA: energía + potencia + fijos + impuestos.
+  // Comparar solo €/kWh engaña: el término de potencia puede invertir el resultado.
   void _calcularComparadorTarifas() {
+    if (_horasPorDia.isEmpty || _diasCalculo <= 0) return;
     Map<String, double> resultado = {};
     for (var nombreTarifa in _tarifasSimulator.keys) {
-      double total = 0.0;
+      double energia = 0.0;
       _horasPorDia.forEach((fecha, horas) {
+        DateTime? dia;
+        try {
+          final p = fecha.split('/');
+          int y = _cycleStart.year;
+          if (int.parse(p[1]) < _cycleStart.month) y = _cycleStart.year + 1;
+          dia = DateTime(y, int.parse(p[1]), int.parse(p[0]));
+        } catch (_) {}
         for (int h = 0; h < horas.length; h++) {
+          final per = dia != null ? _periodoTarifario(dia, h) : 2;
           double precio;
-          if (nombreTarifa == 'Octopus Flexi Live') {
+          if (nombreTarifa == 'PVPC (e-SIOS real)') {
             if (_preciosHistoricos.containsKey(fecha) && h < _preciosHistoricos[fecha]!.length) {
               precio = _preciosHistoricos[fecha]![h];
             } else {
-              if (h >= 10 && h < 14 || h >= 18 && h < 22) precio = 0.18; else if (h >= 8 && h < 10 || h >= 14 && h < 18 || h >= 22 && h <= 23) precio = 0.13; else precio = 0.08;
+              precio = per == 1 ? 0.18 : (per == 2 ? 0.13 : 0.08);
             }
           } else {
-            final precios = _tarifasSimulator[nombreTarifa]!;
-            if (h >= 10 && h < 14 || h >= 18 && h < 22) precio = precios['p']!; else if (h >= 8 && h < 10 || h >= 14 && h < 18 || h >= 22 && h <= 23) precio = precios['l']!; else precio = precios['v']!;
+            final pr = _tarifasSimulator[nombreTarifa]!;
+            precio = per == 1 ? pr['p']! : (per == 2 ? pr['l']! : pr['v']!);
           }
-          total += horas[h] * precio;
+          energia += horas[h] * precio;
         }
       });
-      resultado[nombreTarifa] = total;
+      final fijos = _terminosFijos[nombreTarifa]!;
+      final potencia = ((kPotenciaP1 * fijos['potP1']!) + (kPotenciaP2 * fijos['potP2']!)) * _diasCalculo;
+      final extras = fijos['extraDia']! * _diasCalculo;
+      resultado[nombreTarifa] = (energia + potencia + extras) * _impuestoElectrico * _iva;
     }
     if (mounted) setState(() { _comparadorTarifas = resultado; });
   }
@@ -820,7 +841,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
               double costeDia = 0.0;
               List<double> horasDia = _horasPorDia[dia['fecha']] ?? List.filled(24, 0.0);
               
-              if (_tarifaSeleccionada == 'Octopus Flexi Live') {
+              if (_tarifaSeleccionada == 'PVPC (e-SIOS real)') {
                 for (int h = 0; h < 24; h++) {
                     double precioAplicar = 0.10;
                     if (_preciosHistoricos.containsKey(dia['fecha']) && h < _preciosHistoricos[dia['fecha']]!.length) {
@@ -875,7 +896,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     for(int i = startH; i < endH; i++) {
        if (i < horas.length) {
          double costeHora = 0.0; String tramo = "V";
-         if (_tarifaSeleccionada == 'Octopus Flexi Live') { double p = 0.10; if (_preciosHistoricos.containsKey(fecha) && i < _preciosHistoricos[fecha]!.length) { p = _preciosHistoricos[fecha]![i]; } else { if (i >= 10 && i < 14 || i >= 18 && i < 22) p = 0.18; else if (i >= 8 && i < 10 || i >= 14 && i < 18 || i >= 22 && i <= 23) p = 0.13; else p = 0.08; } costeHora = horas[i] * p; if (i >= 8 && i < 10 || i >= 14 && i < 18 || i >= 22 && i <= 23) { tramo = "L"; } else if (i >= 10 && i < 14 || i >= 18 && i < 22) { tramo = "P"; }
+         if (_tarifaSeleccionada == 'PVPC (e-SIOS real)') { double p = 0.10; if (_preciosHistoricos.containsKey(fecha) && i < _preciosHistoricos[fecha]!.length) { p = _preciosHistoricos[fecha]![i]; } else { if (i >= 10 && i < 14 || i >= 18 && i < 22) p = 0.18; else if (i >= 8 && i < 10 || i >= 14 && i < 18 || i >= 22 && i <= 23) p = 0.13; else p = 0.08; } costeHora = horas[i] * p; if (i >= 8 && i < 10 || i >= 14 && i < 18 || i >= 22 && i <= 23) { tramo = "L"; } else if (i >= 10 && i < 14 || i >= 18 && i < 22) { tramo = "P"; }
          } else { final precios = _tarifasSimulator[_tarifaSeleccionada]!; double precioAplicar = precios['v']!; if (i >= 8 && i < 10 || i >= 14 && i < 18 || i >= 22 && i <= 23) { precioAplicar = precios['l']!; tramo = "L"; } else if (i >= 10 && i < 14 || i >= 18 && i < 22) { precioAplicar = precios['p']!; tramo = "P"; } costeHora = horas[i] * precioAplicar; }
          int barLength = maxKwh > 0 ? ((horas[i] / maxKwh) * 8).round() : 0; String bar = List.filled(barLength, '█').join('').padRight(8, ' '); t += "${i.toString().padLeft(2,'0')}h-[$tramo]-$bar-${horas[i].toStringAsFixed(2)}kWh|${costeHora.toStringAsFixed(3)}€\n"; totalKwh += horas[i]; totalEurosFranja += costeHora;
        }
@@ -1081,7 +1102,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
           ]),
         ),
         const SizedBox(height: 4),
-        const Text("Solo energía (sin potencia fija ni impuestos), calculado con tu consumo horario real.", style: TextStyle(fontSize: 10, color: Colors.grey, fontStyle: FontStyle.italic)),
+        const Text("Factura completa: energía + potencia + fijos + impuestos, con tu consumo horario real.", style: TextStyle(fontSize: 10, color: Colors.grey, fontStyle: FontStyle.italic)),
       ]),
     );
   }
