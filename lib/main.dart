@@ -235,7 +235,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
     WidgetsBinding.instance.addPostFrameCallback((_) { _analizarMeteoElectrica(); });
-    _addLog("eConsumo v37.1.0. Solo conexión manual. Widget redimensionable.");
+    _addLog("eConsumo v37.2.0. Caché de consumos (evita el límite 429).");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -306,16 +306,49 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     } catch (e) { _addLog("Datadis: error en get-supplies → $e"); return false; }
   }
 
-  Future<List<dynamic>> _datadisConsumo(String token, String yyyyMM) async {
+  // Descarga un RANGO de meses en UNA sola llamada (menos cuota) y cachea en
+  // disco. Datadis limita a 1 consulta idéntica cada 24h (HTTP 429), así que
+  // sin caché se pierden los datos al reconectar. No quitar la caché.
+  Future<List<dynamic>> _datadisConsumo(String token, String mesIni, String mesFin) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cacheKey = 'cache_consumo_${mesIni}_$mesFin';
+    final tsKey = 'cache_ts_${mesIni}_$mesFin';
+    final cached = prefs.getString(cacheKey);
+    final ts = prefs.getInt(tsKey) ?? 0;
+    final edadH = (DateTime.now().millisecondsSinceEpoch - ts) / 3600000.0;
+
+    if (cached != null && edadH < 24) {
+      _addLog("Datadis: usando caché de $mesIni-$mesFin (${edadH.toStringAsFixed(1)}h de antigüedad).");
+      try { return jsonDecode(cached) as List<dynamic>; } catch (_) {}
+    }
+
     final url = '$_kDatadisHost/api-private/api/get-consumption-data'
         '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
-        '&startDate=$yyyyMM&endDate=$yyyyMM&measurementType=0&pointType=$_datadisPointType';
+        '&startDate=$mesIni&endDate=$mesFin&measurementType=0&pointType=$_datadisPointType';
     try {
-      final r = await http.get(Uri.parse(url), headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 90));
-      if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
-      if (r.statusCode == 429) { _addLog("Datadis: $yyyyMM ya consultado en 24h (429). Usando lo que haya."); return []; }
-      final b = r.body.trim(); _addLog("Datadis: consumo $yyyyMM HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}");
-    } catch (e) { _addLog("Datadis: error consumo $yyyyMM → $e"); }
+      final r = await http.get(Uri.parse(url), headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 120));
+      if (r.statusCode == 200) {
+        final datos = jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
+        if (datos.isNotEmpty) {
+          await prefs.setString(cacheKey, jsonEncode(datos));
+          await prefs.setInt(tsKey, DateTime.now().millisecondsSinceEpoch);
+          _addLog("Datadis: $mesIni-$mesFin descargado y guardado en caché.");
+        }
+        return datos;
+      }
+      if (r.statusCode == 429) {
+        _addLog("Datadis: límite 24h alcanzado (429) para $mesIni-$mesFin.");
+      } else {
+        final b = r.body.trim();
+        _addLog("Datadis: consumo HTTP ${r.statusCode} → ${b.substring(0, b.length > 160 ? 160 : b.length)}");
+      }
+    } catch (e) { _addLog("Datadis: error de red en consumo → $e"); }
+
+    // Fallback: lo que hubiera cacheado, aunque sea viejo
+    if (cached != null) {
+      _addLog("Datadis: recurriendo a caché antigua (${edadH.toStringAsFixed(1)}h).");
+      try { return jsonDecode(cached) as List<dynamic>; } catch (_) {}
+    }
     return [];
   }
 
@@ -337,35 +370,31 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     setState(() => _status = "Leyendo suministro...");
     if (!await _datadisSupplies(token)) { if (mounted) setState(() { _conectando = false; _status = "Sin suministros"; }); return; }
 
-    // Meses que cubre el ciclo (la API pide AAAA/MM)
-    final Set<String> meses = {};
+    // Un solo rango de meses = una sola consulta (la cuota de Datadis es por consulta/24h)
     final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
-    for (int i = 0; i < diasCiclo; i++) {
-      final dt = _cycleStart.add(Duration(days: i));
-      meses.add("${dt.year}/${dt.month.toString().padLeft(2, '0')}");
-    }
+    final String mesIni = "${_cycleStart.year}/${_cycleStart.month.toString().padLeft(2, '0')}";
+    final String mesFin = "${_cycleEnd.year}/${_cycleEnd.month.toString().padLeft(2, '0')}";
+
+    if (mounted) setState(() => _status = "Descargando $mesIni a $mesFin...");
+    _addLog("Datadis: pidiendo consumo $mesIni → $mesFin...");
+    final datos = await _datadisConsumo(token, mesIni, mesFin);
+    _addLog("Datadis: ${datos.length} registros horarios recibidos.");
 
     final Map<String, List<double>> porDia = {};
     DateTime? ultimoDato;
-    for (final m in meses) {
-      if (mounted) setState(() => _status = "Descargando $m...");
-      _addLog("Datadis: pidiendo consumo de $m...");
-      final datos = await _datadisConsumo(token, m);
-      _addLog("Datadis: $m → ${datos.length} registros horarios.");
-      for (final e in datos) {
-        try {
-          final f = e['date'].toString().replaceAll('-', '/');
-          final partes = f.split('/');
-          if (partes.length != 3) continue;
-          final dt = DateTime(int.parse(partes[0]), int.parse(partes[1]), int.parse(partes[2]));
-          final hh = int.tryParse(e['time'].toString().split(':')[0]) ?? 0;
-          final idx = hh >= 1 ? hh - 1 : 0; // Datadis marca la hora FINAL del tramo
-          final kwh = double.tryParse(e['consumptionKWh'].toString()) ?? 0.0;
-          porDia.putIfAbsent(f, () => List.filled(24, 0.0));
-          if (idx >= 0 && idx < 24) porDia[f]![idx] = kwh;
-          if (kwh > 0 && (ultimoDato == null || dt.isAfter(ultimoDato))) ultimoDato = dt;
-        } catch (_) {}
-      }
+    for (final e in datos) {
+      try {
+        final f = e['date'].toString().replaceAll('-', '/');
+        final partes = f.split('/');
+        if (partes.length != 3) continue;
+        final dt = DateTime(int.parse(partes[0]), int.parse(partes[1]), int.parse(partes[2]));
+        final hh = int.tryParse(e['time'].toString().split(':')[0]) ?? 0;
+        final idx = hh >= 1 ? hh - 1 : 0; // Datadis marca la hora FINAL del tramo
+        final kwh = double.tryParse(e['consumptionKWh'].toString()) ?? 0.0;
+        porDia.putIfAbsent(f, () => List.filled(24, 0.0));
+        if (idx >= 0 && idx < 24) porDia[f]![idx] = kwh;
+        if (kwh > 0 && (ultimoDato == null || dt.isAfter(ultimoDato))) ultimoDato = dt;
+      } catch (_) {}
     }
 
     if (porDia.isEmpty) {
@@ -528,7 +557,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   }
   void _addLog(String msg) { if (!mounted) return; setState(() { _logs.add("[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $msg"); if (_logs.length > 50) _logs.removeAt(0); }); Future.delayed(const Duration(milliseconds: 100), () { if (_logScrollController.hasClients) _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent); }); }
   void _copiarLog() { Clipboard.setData(ClipboardData(text: _logs.join('\n'))); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Terminal copiada'))); }
-  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.remove('email'); await prefs.remove('pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas."); }
+  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.remove('email'); await prefs.remove('pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas (la caché de consumos se conserva)."); }
   String _formatDate(DateTime d) => "${d.day.toString().padLeft(2,'0')}-${d.month.toString().padLeft(2,'0')}-${d.year}";
   String _formatDateShort(DateTime d) => "${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}";
 
