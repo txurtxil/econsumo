@@ -219,7 +219,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v38.2.0. Ventana de 12 meses + caché por mes.");
+    _addLog("eConsumo v38.3.0. Caché antes que red (funciona con Datadis caído).");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -250,6 +250,49 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     return 3;
   }
 
+  List<String> _mesesDelRango(String mesIni, String mesFin) {
+    final List<String> meses = [];
+    int y = int.parse(mesIni.split('/')[0]), m = int.parse(mesIni.split('/')[1]);
+    final int yF = int.parse(mesFin.split('/')[0]), mF = int.parse(mesFin.split('/')[1]);
+    while (y < yF || (y == yF && m <= mF)) {
+      meses.add("$y/${m.toString().padLeft(2, '0')}");
+      m++; if (m > 12) { m = 1; y++; }
+      if (meses.length > 24) break;
+    }
+    return meses;
+  }
+
+  // Lee de caché los meses pedidos. Devuelve null si falta alguno "fresco".
+  // Clave del diseño: esto NO toca la red, así que funciona con Datadis caído.
+  Future<List<dynamic>?> _leerCacheMeses(List<String> meses) async {
+    final prefs = await SharedPreferences.getInstance();
+    final ahora = DateTime.now();
+    final String mesActual = "${ahora.year}/${ahora.month.toString().padLeft(2, '0')}";
+    final List<dynamic> out = [];
+    for (final mes in meses) {
+      final cached = prefs.getString('cache_mes_$mes');
+      if (cached == null) return null;
+      final ts = prefs.getInt('cache_mes_ts_$mes') ?? 0;
+      final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
+      final bool cerrado = mes != mesActual;
+      if (!cerrado && edadH >= 12) return null; // el mes en curso conviene refrescarlo
+      try { out.addAll(jsonDecode(cached) as List<dynamic>); } catch (_) { return null; }
+    }
+    return out;
+  }
+
+  // Último recurso: todo lo que haya en caché, sin importar la antigüedad.
+  Future<List<dynamic>> _leerCacheMesesForzado(List<String> meses) async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<dynamic> out = [];
+    for (final mes in meses) {
+      final cached = prefs.getString('cache_mes_$mes');
+      if (cached == null) continue;
+      try { out.addAll(jsonDecode(cached) as List<dynamic>); } catch (_) {}
+    }
+    return out;
+  }
+
   Future<String?> _datadisLogin() async {
     try {
       final r = await http.post(
@@ -268,7 +311,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<bool> _datadisSupplies(String token) async {
     try {
       final r = await http.get(Uri.parse('$_kDatadisHost/api-private/api/get-supplies'),
-          headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 60));
+          headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 25));
       if (r.statusCode != 200) { final b = r.body.trim(); _addLog("Datadis: get-supplies HTTP ${r.statusCode} → ${b.substring(0, b.length > 200 ? 200 : b.length)}"); return false; }
       final List d = jsonDecode(utf8.decode(r.bodyBytes));
       if (d.isEmpty) { _addLog("Datadis: no hay suministros asociados a tu NIF."); return false; }
@@ -285,6 +328,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         _cups = _datadisCups;
         (await SharedPreferences.getInstance()).setString('cups', _cups);
       }
+      final pf = await SharedPreferences.getInstance();
+      await pf.setString('sup_cups', _datadisCups);
+      await pf.setString('sup_dist', _datadisDistCode);
+      await pf.setString('sup_pt', _datadisPointType);
       _addLog("Datadis: suministro OK (dist. $_datadisDistCode, tipo $_datadisPointType).");
       return true;
     } catch (e) { _addLog("Datadis: error en get-supplies → $e"); return false; }
@@ -386,22 +433,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<void> _conectarAhora() async {
     if (_conectando) return;
     if (_email.isEmpty || _pass.isEmpty) { _addLog("Faltan credenciales de Datadis."); return; }
-    setState(() { _conectando = true; _status = "Autenticando en Datadis..."; });
-    _addLog("Datadis: conexión manual iniciada.");
+    setState(() { _conectando = true; _status = "Preparando datos..."; });
+    _addLog("Datadis: actualización solicitada.");
 
-    final token = await _datadisLogin();
-    if (token == null) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|Login Datadis rechazado');
-      if (mounted) setState(() { _conectando = false; _status = "Error de login"; _lastSyncError = 'x|Login Datadis rechazado'; });
-      return;
-    }
-    _addLog("Datadis: token obtenido.");
-    if (!mounted) return;
-    setState(() => _status = "Leyendo suministro...");
-    if (!await _datadisSupplies(token)) { if (mounted) setState(() { _conectando = false; _status = "Sin suministros"; }); return; }
-
-    // Un solo rango de meses = una sola consulta (la cuota de Datadis es por consulta/24h)
     final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
     // Datadis rechaza meses futuros: el mes final nunca puede pasar del actual.
     final DateTime hoy = DateTime.now();
@@ -409,11 +443,38 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     if (finReal.isBefore(_cycleStart)) finReal = _cycleStart;
     final String mesIni = "${_cycleStart.year}/${_cycleStart.month.toString().padLeft(2, '0')}";
     final String mesFin = "${finReal.year}/${finReal.month.toString().padLeft(2, '0')}";
+    final List<String> mesesNecesarios = _mesesDelRango(mesIni, mesFin);
 
-    if (mounted) setState(() => _status = "Descargando $mesIni a $mesFin...");
-    _addLog("Datadis: pidiendo consumo $mesIni → $mesFin...");
-    final datos = await _datadisConsumo(token, mesIni, mesFin);
-    _addLog("Datadis: ${datos.length} registros horarios recibidos.");
+    // ---- PASO 1: ¿lo tenemos ya en caché? Entonces NI TOCAMOS LA RED. ----
+    // Esto es esencial: la API de Datadis se cae a menudo (502/timeouts) y no
+    // tiene sentido dejar al usuario sin datos que ya están en el móvil.
+    List<dynamic> datos = await _leerCacheMeses(mesesNecesarios) ?? [];
+    if (datos.isNotEmpty) {
+      _addLog("Datadis: ${datos.length} registros desde caché (sin conexión).");
+    } else {
+      // ---- PASO 2: hace falta red ----
+      setState(() => _status = "Autenticando en Datadis...");
+      final token = await _datadisLogin();
+      if (token != null) {
+        _addLog("Datadis: token obtenido.");
+        if (!mounted) return;
+        setState(() => _status = "Leyendo suministro...");
+        bool sup = _datadisCups.isNotEmpty && _datadisDistCode.isNotEmpty;
+        if (sup) { _addLog("Datadis: suministro desde caché (dist. $_datadisDistCode)."); }
+        else { sup = await _datadisSupplies(token); }
+        if (sup) {
+          if (mounted) setState(() => _status = "Descargando $mesIni a $mesFin...");
+          _addLog("Datadis: pidiendo consumo $mesIni → $mesFin...");
+          datos = await _datadisConsumo(token, mesIni, mesFin);
+          _addLog("Datadis: ${datos.length} registros horarios recibidos.");
+        }
+      }
+      // ---- PASO 3: si la red falló, rescatamos caché aunque esté vieja ----
+      if (datos.isEmpty) {
+        datos = await _leerCacheMesesForzado(mesesNecesarios);
+        if (datos.isNotEmpty) _addLog("Datadis: sin red, usando ${datos.length} registros de caché antigua.");
+      }
+    }
 
     final Map<String, List<double>> porDia = {};
     DateTime? ultimoDato;
@@ -520,6 +581,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     final String? t = prefs.getString('tarifa_activa');
     final int? dc = prefs.getInt('dia_corte');
     final String cups = prefs.getString('cups') ?? '';
+    _datadisCups = prefs.getString('sup_cups') ?? '';
+    _datadisDistCode = prefs.getString('sup_dist') ?? '';
+    _datadisPointType = prefs.getString('sup_pt') ?? '5';
     if (!mounted) return;
     setState(() {
       _cups = cups;
