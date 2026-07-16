@@ -219,7 +219,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v38.0.0. Limpieza: sin Groq, sin meteo, sin PLC.");
+    _addLog("eConsumo v38.1.0. Caché por mes (sirve para cualquier ciclo).");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -290,50 +290,89 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     } catch (e) { _addLog("Datadis: error en get-supplies → $e"); return false; }
   }
 
-  // Descarga un RANGO de meses en UNA sola llamada (menos cuota) y cachea en
-  // disco. Datadis limita a 1 consulta idéntica cada 24h (HTTP 429), así que
-  // sin caché se pierden los datos al reconectar. No quitar la caché.
+  // Caché POR MES (no por rango): así los datos de un mes sirven para cualquier
+  // ciclo que lo incluya. Datadis limita a 1 consulta idéntica cada 24h (429),
+  // de modo que sin esto un cambio de día de corte deja la app sin datos.
+  // Los meses cerrados no cambian nunca -> caché permanente.
   Future<List<dynamic>> _datadisConsumo(String token, String mesIni, String mesFin) async {
     final prefs = await SharedPreferences.getInstance();
-    final cacheKey = 'cache_consumo_${mesIni}_$mesFin';
-    final tsKey = 'cache_ts_${mesIni}_$mesFin';
-    final cached = prefs.getString(cacheKey);
-    final ts = prefs.getInt(tsKey) ?? 0;
-    final edadH = (DateTime.now().millisecondsSinceEpoch - ts) / 3600000.0;
+    final ahora = DateTime.now();
+    final String mesActual = "${ahora.year}/${ahora.month.toString().padLeft(2, '0')}";
 
-    if (cached != null && edadH < 24) {
-      _addLog("Datadis: usando caché de $mesIni-$mesFin (${edadH.toStringAsFixed(1)}h de antigüedad).");
-      try { return jsonDecode(cached) as List<dynamic>; } catch (_) {}
+    // Lista de meses del rango
+    final List<String> meses = [];
+    int y = int.parse(mesIni.split('/')[0]), m = int.parse(mesIni.split('/')[1]);
+    final int yF = int.parse(mesFin.split('/')[0]), mF = int.parse(mesFin.split('/')[1]);
+    while (y < yF || (y == yF && m <= mF)) {
+      meses.add("$y/${m.toString().padLeft(2, '0')}");
+      m++; if (m > 12) { m = 1; y++; }
+      if (meses.length > 24) break;
     }
 
+    final List<dynamic> resultado = [];
+    final List<String> faltantes = [];
+    for (final mes in meses) {
+      final cached = prefs.getString('cache_mes_$mes');
+      final ts = prefs.getInt('cache_mes_ts_$mes') ?? 0;
+      final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
+      final bool cerrado = mes != mesActual; // un mes pasado ya no cambia
+      if (cached != null && (cerrado || edadH < 12)) {
+        try {
+          resultado.addAll(jsonDecode(cached) as List<dynamic>);
+          _addLog("Datadis: $mes desde caché${cerrado ? ' (mes cerrado)' : ' (${edadH.toStringAsFixed(1)}h)'}.");
+          continue;
+        } catch (_) {}
+      }
+      faltantes.add(mes);
+    }
+
+    if (faltantes.isEmpty) return resultado;
+
+    // Pedimos solo el rango que falta, en una sola llamada
+    final String pedIni = faltantes.first, pedFin = faltantes.last;
+    _addLog("Datadis: descargando $pedIni → $pedFin...");
     final url = '$_kDatadisHost/api-private/api/get-consumption-data'
         '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
-        '&startDate=$mesIni&endDate=$mesFin&measurementType=0&pointType=$_datadisPointType';
+        '&startDate=$pedIni&endDate=$pedFin&measurementType=0&pointType=$_datadisPointType';
     try {
       final r = await http.get(Uri.parse(url), headers: _cabecerasDatadis(token)).timeout(const Duration(seconds: 120));
       if (r.statusCode == 200) {
         final datos = jsonDecode(utf8.decode(r.bodyBytes)) as List<dynamic>;
-        if (datos.isNotEmpty) {
-          await prefs.setString(cacheKey, jsonEncode(datos));
-          await prefs.setInt(tsKey, DateTime.now().millisecondsSinceEpoch);
-          _addLog("Datadis: $mesIni-$mesFin descargado y guardado en caché.");
+        // Repartimos por mes y cacheamos cada uno por separado
+        final Map<String, List<dynamic>> porMes = {};
+        for (final e in datos) {
+          try {
+            final p = e['date'].toString().replaceAll('-', '/').split('/');
+            porMes.putIfAbsent("${p[0]}/${p[1]}", () => []).add(e);
+          } catch (_) {}
         }
-        return datos;
+        for (final entry in porMes.entries) {
+          await prefs.setString('cache_mes_${entry.key}', jsonEncode(entry.value));
+          await prefs.setInt('cache_mes_ts_${entry.key}', ahora.millisecondsSinceEpoch);
+        }
+        _addLog("Datadis: ${datos.length} registros nuevos, cacheados ${porMes.keys.length} mes(es).");
+        resultado.addAll(datos);
+        return resultado;
       }
       if (r.statusCode == 429) {
-        _addLog("Datadis: límite 24h alcanzado (429) para $mesIni-$mesFin.");
+        _addLog("Datadis: límite 24h (429) para $pedIni-$pedFin.");
       } else {
         final b = r.body.trim();
         _addLog("Datadis: consumo HTTP ${r.statusCode} → ${b.substring(0, b.length > 160 ? 160 : b.length)}");
       }
-    } catch (e) { _addLog("Datadis: error de red en consumo → $e"); }
+    } catch (e) { _addLog("Datadis: error de red → $e"); }
 
-    // Fallback: lo que hubiera cacheado, aunque sea viejo
-    if (cached != null) {
-      _addLog("Datadis: recurriendo a caché antigua (${edadH.toStringAsFixed(1)}h).");
-      try { return jsonDecode(cached) as List<dynamic>; } catch (_) {}
+    // Falló: rescatamos de caché lo que haya, aunque esté vieja
+    for (final mes in faltantes) {
+      final cached = prefs.getString('cache_mes_$mes');
+      if (cached != null) {
+        try {
+          resultado.addAll(jsonDecode(cached) as List<dynamic>);
+          _addLog("Datadis: $mes recuperado de caché antigua.");
+        } catch (_) {}
+      }
     }
-    return [];
+    return resultado;
   }
 
   Future<void> _conectarAhora() async {
@@ -466,6 +505,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   Future<void> _cargarTarifaGuardada() async {
     final prefs = await SharedPreferences.getInstance();
+    // Limpieza de las cachés antiguas por rango (v37.2.0-v38.0.0)
+    for (final k in prefs.getKeys().where((k) => k.startsWith('cache_consumo_') || k.startsWith('cache_ts_')).toList()) {
+      await prefs.remove(k);
+    }
     final String? t = prefs.getString('tarifa_activa');
     final int? dc = prefs.getInt('dia_corte');
     final String cups = prefs.getString('cups') ?? '';
