@@ -219,7 +219,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v38.1.0. Caché por mes (sirve para cualquier ciclo).");
+    _addLog("eConsumo v38.2.0. Ventana de 12 meses + caché por mes.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -328,9 +328,17 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
     if (faltantes.isEmpty) return resultado;
 
-    // Pedimos solo el rango que falta, en una sola llamada
-    final String pedIni = faltantes.first, pedFin = faltantes.last;
-    _addLog("Datadis: descargando $pedIni → $pedFin...");
+    // Pedimos una VENTANA ANCHA de 12 meses que termine en el último mes que
+    // falta. Motivos: (1) Datadis da 429 si repites la MISMA consulta en 24h,
+    // así que un rango ancho y estable evita chocar con consultas estrechas ya
+    // gastadas; (2) de un solo viaje cacheamos todo el histórico, de modo que
+    // cualquier día de corte funciona sin volver a llamar; (3) el comparador de
+    // la CNMC pide 12 meses de curvas.
+    final String pedFin = faltantes.last;
+    final int yF2 = int.parse(pedFin.split('/')[0]), mF2 = int.parse(pedFin.split('/')[1]);
+    final DateTime ini12 = DateTime(yF2, mF2 - 11, 1);
+    final String pedIni = "${ini12.year}/${ini12.month.toString().padLeft(2, '0')}";
+    _addLog("Datadis: descargando $pedIni → $pedFin (ventana de 12 meses)...");
     final url = '$_kDatadisHost/api-private/api/get-consumption-data'
         '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
         '&startDate=$pedIni&endDate=$pedFin&measurementType=0&pointType=$_datadisPointType';
