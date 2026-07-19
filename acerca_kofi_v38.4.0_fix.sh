@@ -1,3 +1,6 @@
+set -e
+cd ~/econsumo
+cat > lib/main.dart << 'EOF'
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -1331,3 +1334,17 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Widget _tarjetaPrediccion() { double totalEuros = (_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva; int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; return Card(color: Colors.white, elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.indigo.shade200)), child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [const Icon(Icons.trending_up, color: Colors.indigo, size: 24), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text("PREDICCIÓN FIN DE CICLO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)), Text("${pred.toStringAsFixed(2)} €", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.indigo)),],),],)],),),); }
   Widget _tarjetaInfoFlexi() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFFE0F7FA), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5)), borderRadius: BorderRadius.circular(20)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.ev_station, color: Colors.indigo, size: 20), SizedBox(width: 8), Text("Estrategia Leapmotor + Flexi", style: TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold, fontSize: 14))]), const SizedBox(height: 12), const Text("El sistema ahora evalúa tu histórico al milímetro. Recuerda: para llenar los 67.2kWh de tu Leapmotor al precio más barato, carga de 00:00 a 08:00 o los fines de semana.", style: TextStyle(fontSize: 12, color: Colors.black87)), const SizedBox(height: 8), const Text("ℹ️ El mercado OMIE subasta la luz a las 12:00h y los precios definitivos para el día siguiente se publican en E-SIOS a partir de las 20:30h.", style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.blueGrey)), const SizedBox(height: 16), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _imprimirMasterPlanEV, icon: const Icon(Icons.print, color: Colors.white), label: const Text("IMPRIMIR MASTERPLAN", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, padding: const EdgeInsets.symmetric(vertical: 12))))]));
 }
+EOF
+
+MANIFEST=android/app/src/main/AndroidManifest.xml
+if ! grep -q 'android:scheme="https"' "$MANIFEST"; then
+  if grep -q '</queries>' "$MANIFEST"; then
+    sed -i 's#</queries>#    <intent>\n            <action android:name="android.intent.action.VIEW" />\n            <data android:scheme="https" />\n        </intent>\n    </queries>#' "$MANIFEST"
+    echo "Query https anadida al manifest."
+  else
+    echo "AVISO: sin bloque <queries>. Anade a mano antes de </manifest>: <queries><intent><action android:name=\"android.intent.action.VIEW\"/><data android:scheme=\"https\"/></intent></queries>"
+  fi
+else
+  echo "El manifest ya tiene la query https."
+fi
+echo "v38.4.0 (fix imports): Acerca de + Ko-fi."
