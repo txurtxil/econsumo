@@ -209,6 +209,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   final List<String> _logs = []; final ScrollController _logScrollController = ScrollController(); Timer? _rescueTimer;
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
+  DateTime? _proximaDescargaMes; // hora a la que el mes en curso volverá a poder descargarse (últ. descarga + 24h)
   bool _conectando = false; String _cups = '';
   String _datadisCups = ''; String _datadisDistCode = ''; String _datadisPointType = '5';
   Map<String, double> _comparadorTarifas = {};
@@ -219,7 +220,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v38.3.0. Caché antes que red (funciona con Datadis caído).");
+    _addLog("eConsumo v38.3.2. Muestra la próxima hora de descarga posible.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -375,17 +376,26 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
     if (faltantes.isEmpty) return resultado;
 
-    // Pedimos una VENTANA ANCHA de 12 meses que termine en el último mes que
-    // falta. Motivos: (1) Datadis da 429 si repites la MISMA consulta en 24h,
-    // así que un rango ancho y estable evita chocar con consultas estrechas ya
-    // gastadas; (2) de un solo viaje cacheamos todo el histórico, de modo que
-    // cualquier día de corte funciona sin volver a llamar; (3) el comparador de
-    // la CNMC pide 12 meses de curvas.
-    final String pedFin = faltantes.last;
-    final int yF2 = int.parse(pedFin.split('/')[0]), mF2 = int.parse(pedFin.split('/')[1]);
-    final DateTime ini12 = DateTime(yF2, mF2 - 11, 1);
-    final String pedIni = "${ini12.year}/${ini12.month.toString().padLeft(2, '0')}";
-    _addLog("Datadis: descargando $pedIni → $pedFin (ventana de 12 meses)...");
+    final DateTime ahoraDt = DateTime.now();
+    final String mesEnCurso = "${ahoraDt.year}/${ahoraDt.month.toString().padLeft(2, '0')}";
+
+    String pedIni, pedFin;
+    if (faltantes.length == 1 && faltantes.first == mesEnCurso) {
+      // Caso habitual del día a día: solo falta refrescar el mes actual.
+      // Pedimos SOLO ese mes: la consulta cambia de contenido según avanza el
+      // mes y no depende de la ventana grande (que solo sirve 1 vez/24h).
+      pedIni = pedFin = mesEnCurso;
+      _addLog("Datadis: refrescando mes en curso $mesEnCurso...");
+    } else {
+      // Falta histórico: ventana de 12 meses que termina en el último que falta.
+      // (1) esquiva el 429 de consultas estrechas ya gastadas, (2) cachea todo
+      // el histórico de un viaje, (3) da los 12 meses que pide la CNMC.
+      pedFin = faltantes.last;
+      final int yF2 = int.parse(pedFin.split('/')[0]), mF2 = int.parse(pedFin.split('/')[1]);
+      final DateTime ini12 = DateTime(yF2, mF2 - 11, 1);
+      pedIni = "${ini12.year}/${ini12.month.toString().padLeft(2, '0')}";
+      _addLog("Datadis: descargando $pedIni → $pedFin (ventana de 12 meses)...");
+    }
     final url = '$_kDatadisHost/api-private/api/get-consumption-data'
         '?cups=$_datadisCups&distributorCode=$_datadisDistCode'
         '&startDate=$pedIni&endDate=$pedFin&measurementType=0&pointType=$_datadisPointType';
@@ -529,6 +539,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('last_sync_ts', _lastSyncTime!.toIso8601String());
     await prefs.remove('last_sync_error');
+    final String mesAct = "${DateTime.now().year}/${DateTime.now().month.toString().padLeft(2, '0')}";
+    final int tsM = prefs.getInt('cache_mes_ts_$mesAct') ?? 0;
+    if (tsM > 0 && mounted) setState(() { _proximaDescargaMes = DateTime.fromMillisecondsSinceEpoch(tsM).add(const Duration(hours: 24)); });
     _addLog("Datadis: ${_kwhTotal.toStringAsFixed(1)} kWh (P:${p.toStringAsFixed(1)} L:${l.toStringAsFixed(1)} V:${v.toStringAsFixed(1)}).");
 
     _aplicarCostesFijos();
@@ -626,8 +639,15 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     final prefs = await SharedPreferences.getInstance();
     final String? ts = prefs.getString('last_sync_ts');
     final String? err = prefs.getString('last_sync_error');
+    final ahora = DateTime.now();
+    final String mesActual = "${ahora.year}/${ahora.month.toString().padLeft(2, '0')}";
+    final int tsMes = prefs.getInt('cache_mes_ts_$mesActual') ?? 0;
     if (!mounted) return;
-    setState(() { _lastSyncTime = ts != null ? DateTime.tryParse(ts) : null; _lastSyncError = err; });
+    setState(() {
+      _lastSyncTime = ts != null ? DateTime.tryParse(ts) : null;
+      _lastSyncError = err;
+      _proximaDescargaMes = tsMes > 0 ? DateTime.fromMillisecondsSinceEpoch(tsMes).add(const Duration(hours: 24)) : null;
+    });
   }
   
   void _calcularFechasCiclo() {
@@ -1122,7 +1142,17 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       child: Row(children: [
         Icon(stale ? Icons.warning_amber_rounded : Icons.check_circle, color: stale ? Colors.red : Colors.green, size: 18),
         const SizedBox(width: 8),
-        Expanded(child: Text(texto, style: TextStyle(fontSize: 11, color: stale ? Colors.red.shade900 : Colors.green.shade900, fontWeight: FontWeight.bold))),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(texto, style: TextStyle(fontSize: 11, color: stale ? Colors.red.shade900 : Colors.green.shade900, fontWeight: FontWeight.bold)),
+          if (_proximaDescargaMes != null) Builder(builder: (_) {
+            final falta = _proximaDescargaMes!.difference(DateTime.now());
+            final hh = "${_proximaDescargaMes!.hour.toString().padLeft(2, '0')}:${_proximaDescargaMes!.minute.toString().padLeft(2, '0')}";
+            final txt = falta.isNegative
+                ? "Ya puedes descargar datos nuevos del mes en curso."
+                : "Próxima descarga posible: hoy/mañana a las $hh (Datadis limita a 1 vez/24h).";
+            return Padding(padding: const EdgeInsets.only(top: 2), child: Text(txt, style: TextStyle(fontSize: 10, color: falta.isNegative ? Colors.green.shade700 : Colors.blueGrey)));
+          }),
+        ])),
         if (_lastSyncError != null) IconButton(
           icon: const Icon(Icons.info_outline, size: 18, color: Colors.redAccent),
           tooltip: "Ver motivo del último fallo",
