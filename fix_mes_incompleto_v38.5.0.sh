@@ -15,7 +15,7 @@ import 'package:html/parser.dart' show parse;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.4.0';
+const String kAppVersion = '38.5.0';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -225,7 +225,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Sección Acerca de + Ko-fi.");
+    _addLog("eConsumo v$kAppVersion. Fix meses cerrados incompletos.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -256,6 +256,19 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     return 3;
   }
 
+  // Un mes cacheado MIENTRAS estaba en curso queda incompleto (le faltan los
+  // últimos días). Al cerrarse el mes no basta con darlo por bueno: hay que
+  // comprobar que contiene todos sus días, o esos huecos serían permanentes.
+  bool _mesCompleto(String mes, List<dynamic> registros) {
+    final int y = int.parse(mes.split('/')[0]), m = int.parse(mes.split('/')[1]);
+    final int diasDelMes = DateTime(y, m + 1, 0).day;
+    final Set<String> dias = {};
+    for (final e in registros) {
+      try { dias.add(e['date'].toString()); } catch (_) {}
+    }
+    return dias.length >= diasDelMes;
+  }
+
   List<String> _mesesDelRango(String mesIni, String mesFin) {
     final List<String> meses = [];
     int y = int.parse(mesIni.split('/')[0]), m = int.parse(mesIni.split('/')[1]);
@@ -282,7 +295,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
       final bool cerrado = mes != mesActual;
       if (!cerrado && edadH >= 12) return null; // el mes en curso conviene refrescarlo
-      try { out.addAll(jsonDecode(cached) as List<dynamic>); } catch (_) { return null; }
+      try {
+        final regs = jsonDecode(cached) as List<dynamic>;
+        if (cerrado && !_mesCompleto(mes, regs)) return null; // caché incompleta: hay que ir a la red
+        out.addAll(regs);
+      } catch (_) { return null; }
     }
     return out;
   }
@@ -368,12 +385,17 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       final cached = prefs.getString('cache_mes_$mes');
       final ts = prefs.getInt('cache_mes_ts_$mes') ?? 0;
       final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
-      final bool cerrado = mes != mesActual; // un mes pasado ya no cambia
+      final bool cerrado = mes != mesActual;
       if (cached != null && (cerrado || edadH < 12)) {
         try {
-          resultado.addAll(jsonDecode(cached) as List<dynamic>);
-          _addLog("Datadis: $mes desde caché${cerrado ? ' (mes cerrado)' : ' (${edadH.toStringAsFixed(1)}h)'}.");
-          continue;
+          final regs = jsonDecode(cached) as List<dynamic>;
+          if (cerrado && !_mesCompleto(mes, regs)) {
+            _addLog("Datadis: caché de $mes incompleta (se guardó con el mes en curso). Se vuelve a pedir.");
+          } else {
+            resultado.addAll(regs);
+            _addLog("Datadis: $mes desde caché${cerrado ? ' (mes cerrado)' : ' (${edadH.toStringAsFixed(1)}h)'}.");
+            continue;
+          }
         } catch (_) {}
       }
       faltantes.add(mes);
@@ -1335,16 +1357,4 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Widget _tarjetaInfoFlexi() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFFE0F7FA), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5)), borderRadius: BorderRadius.circular(20)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.ev_station, color: Colors.indigo, size: 20), SizedBox(width: 8), Text("Estrategia Leapmotor + Flexi", style: TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold, fontSize: 14))]), const SizedBox(height: 12), const Text("El sistema ahora evalúa tu histórico al milímetro. Recuerda: para llenar los 67.2kWh de tu Leapmotor al precio más barato, carga de 00:00 a 08:00 o los fines de semana.", style: TextStyle(fontSize: 12, color: Colors.black87)), const SizedBox(height: 8), const Text("ℹ️ El mercado OMIE subasta la luz a las 12:00h y los precios definitivos para el día siguiente se publican en E-SIOS a partir de las 20:30h.", style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.blueGrey)), const SizedBox(height: 16), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _imprimirMasterPlanEV, icon: const Icon(Icons.print, color: Colors.white), label: const Text("IMPRIMIR MASTERPLAN", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, padding: const EdgeInsets.symmetric(vertical: 12))))]));
 }
 EOF
-
-MANIFEST=android/app/src/main/AndroidManifest.xml
-if ! grep -q 'android:scheme="https"' "$MANIFEST"; then
-  if grep -q '</queries>' "$MANIFEST"; then
-    sed -i 's#</queries>#    <intent>\n            <action android:name="android.intent.action.VIEW" />\n            <data android:scheme="https" />\n        </intent>\n    </queries>#' "$MANIFEST"
-    echo "Query https anadida al manifest."
-  else
-    echo "AVISO: sin bloque <queries>. Anade a mano antes de </manifest>: <queries><intent><action android:name=\"android.intent.action.VIEW\"/><data android:scheme=\"https\"/></intent></queries>"
-  fi
-else
-  echo "El manifest ya tiene la query https."
-fi
-echo "v38.4.0 (fix imports): Acerca de + Ko-fi."
+echo "v38.5.0: revalida meses cerrados incompletos en cache."

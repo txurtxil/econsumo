@@ -12,7 +12,7 @@ import 'package:html/parser.dart' show parse;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.4.0';
+const String kAppVersion = '38.5.0';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -222,7 +222,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Sección Acerca de + Ko-fi.");
+    _addLog("eConsumo v$kAppVersion. Fix meses cerrados incompletos.");
     // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
     // El usuario decide cuándo conectar (botón o tirar para refrescar).
     // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
@@ -253,6 +253,19 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     return 3;
   }
 
+  // Un mes cacheado MIENTRAS estaba en curso queda incompleto (le faltan los
+  // últimos días). Al cerrarse el mes no basta con darlo por bueno: hay que
+  // comprobar que contiene todos sus días, o esos huecos serían permanentes.
+  bool _mesCompleto(String mes, List<dynamic> registros) {
+    final int y = int.parse(mes.split('/')[0]), m = int.parse(mes.split('/')[1]);
+    final int diasDelMes = DateTime(y, m + 1, 0).day;
+    final Set<String> dias = {};
+    for (final e in registros) {
+      try { dias.add(e['date'].toString()); } catch (_) {}
+    }
+    return dias.length >= diasDelMes;
+  }
+
   List<String> _mesesDelRango(String mesIni, String mesFin) {
     final List<String> meses = [];
     int y = int.parse(mesIni.split('/')[0]), m = int.parse(mesIni.split('/')[1]);
@@ -279,7 +292,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
       final bool cerrado = mes != mesActual;
       if (!cerrado && edadH >= 12) return null; // el mes en curso conviene refrescarlo
-      try { out.addAll(jsonDecode(cached) as List<dynamic>); } catch (_) { return null; }
+      try {
+        final regs = jsonDecode(cached) as List<dynamic>;
+        if (cerrado && !_mesCompleto(mes, regs)) return null; // caché incompleta: hay que ir a la red
+        out.addAll(regs);
+      } catch (_) { return null; }
     }
     return out;
   }
@@ -365,12 +382,17 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       final cached = prefs.getString('cache_mes_$mes');
       final ts = prefs.getInt('cache_mes_ts_$mes') ?? 0;
       final edadH = (ahora.millisecondsSinceEpoch - ts) / 3600000.0;
-      final bool cerrado = mes != mesActual; // un mes pasado ya no cambia
+      final bool cerrado = mes != mesActual;
       if (cached != null && (cerrado || edadH < 12)) {
         try {
-          resultado.addAll(jsonDecode(cached) as List<dynamic>);
-          _addLog("Datadis: $mes desde caché${cerrado ? ' (mes cerrado)' : ' (${edadH.toStringAsFixed(1)}h)'}.");
-          continue;
+          final regs = jsonDecode(cached) as List<dynamic>;
+          if (cerrado && !_mesCompleto(mes, regs)) {
+            _addLog("Datadis: caché de $mes incompleta (se guardó con el mes en curso). Se vuelve a pedir.");
+          } else {
+            resultado.addAll(regs);
+            _addLog("Datadis: $mes desde caché${cerrado ? ' (mes cerrado)' : ' (${edadH.toStringAsFixed(1)}h)'}.");
+            continue;
+          }
         } catch (_) {}
       }
       faltantes.add(mes);
