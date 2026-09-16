@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '39.0.0';
+const String kAppVersion = '40.0.1';
 
 // Credenciales de Datadis en almacenamiento seguro (Keystore de Android).
 // Antes iban en SharedPreferences en texto plano (pendiente de seguridad nº1).
@@ -127,7 +127,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Limpieza pre-Play: sin workmanager, festivos 2026.");
+    _addLog("eConsumo v$kAppVersion iniciada.");
     // Sin sincronización automática: el usuario decide cuándo conectar
     // (botón o tirar para refrescar). WorkManager está cancelado al arrancar.
   }
