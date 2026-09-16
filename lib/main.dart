@@ -11,7 +11,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.8.0';
+const String kAppVersion = '38.9.0';
 
 // Credenciales de Datadis en almacenamiento seguro (Keystore de Android).
 // Antes iban en SharedPreferences en texto plano (pendiente de seguridad nº1).
@@ -239,7 +239,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Ajuste fiscal fino contra factura real.");
+    _addLog("eConsumo v$kAppVersion. Ciclo ajustado a lecturas de contador (30 días).");
     // Sin sincronización automática: el usuario decide cuándo conectar
     // (botón o tirar para refrescar). WorkManager está cancelado al arrancar.
   }
@@ -486,7 +486,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     setState(() { _conectando = true; _status = "Preparando datos..."; });
     _addLog("Datadis: actualización solicitada.");
 
-    final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
+    final int diasCiclo = _cycleEnd.difference(_cycleStart).inDays; // cierre exclusivo: 30 días, no 31
     // Datadis rechaza meses futuros: el mes final nunca puede pasar del actual.
     final DateTime hoy = DateTime.now();
     DateTime finReal = _cycleEnd.isAfter(hoy) ? hoy : _cycleEnd;
@@ -712,7 +712,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       _fetchEnd = DateTime(now.year, now.month, now.day - 1);
       if (_fetchEnd.isBefore(_cycleStart)) _fetchEnd = _cycleStart;
     } else {
-      _fetchEnd = _cycleEnd; 
+      // _cycleEnd es la fecha de la lectura de cierre (00:00): ese día NO se
+      // factura en este ciclo, entra en el siguiente. Verificado con factura
+      // real: 15/07-14/08 = 30 días; el día 14/08 (71,45 kWh) lo cobró la
+      // factura posterior.
+      _fetchEnd = _cycleEnd.subtract(const Duration(days: 1));
     }
   }
 
@@ -803,7 +807,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Future<void> _sincronizarWidgetNativo() async { 
       double totalEuros = ((_costeEnergia + _costePotencia) * _impuestoElectrico + _cuotaOctopus) * _iva; 
       int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; 
-      int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; 
+      int diasTotales = _cycleEnd.difference(_cycleStart).inDays; 
       double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; 
       
       const String textoWidget = "";
@@ -828,7 +832,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     }
     List<Map<String, dynamic>> tempDiario = []; Map<String, List<double>> tempHorasPorDia = {}; List<double> sumByHour = List.filled(24, 0.0);
     int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; if (diasRegistrados <= 0) diasRegistrados = 1;
-    double costeFlexiTemp = 0.0; int diasTotalesCiclo = _cycleEnd.difference(_cycleStart).inDays + 1;
+    double costeFlexiTemp = 0.0; int diasTotalesCiclo = _cycleEnd.difference(_cycleStart).inDays;
     for (int d = 0; d < diasTotalesCiclo; d++) { 
         DateTime diaActual = _cycleStart.add(Duration(days: d)); String fechaStr = "${diaActual.day.toString().padLeft(2,'0')}/${diaActual.month.toString().padLeft(2,'0')}"; 
         List<double> horasDeEsteDia = []; double kwhDia = 0; 
@@ -1347,6 +1351,6 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   Widget _tarjetaGraficoHorario() { double maxKwh = 0; for(var d in _promedioPorHora){ if(d>maxKwh) maxKwh = d; } return Container(padding: const EdgeInsets.all(16), height: 250, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [ const Text("PERFIL HORARIO MEDIO (kWh)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const SizedBox(height: 16), Expanded(child: LineChart(LineChartData(lineBarsData: [LineChartBarData(spots: _promedioPorHora.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value)).toList(), isCurved: true, color: Colors.indigoAccent, barWidth: 3, isStrokeCapRound: true, belowBarData: BarAreaData(show: true, color: Colors.indigoAccent.withOpacity(0.2)))], titlesData: FlTitlesData(show: true, bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, interval: 6, reservedSize: 22, getTitlesWidget: (v, m) { if (v.toInt() % 6 != 0) return const SizedBox(); return Text("${v.toInt()}h", style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.bold)); })), leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))), borderData: FlBorderData(show: false), gridData: FlGridData(show: false), lineTouchData: LineTouchData(enabled: true, touchTooltipData: LineTouchTooltipData(getTooltipColor: (group) => Colors.black87, getTooltipItems: (spots) => spots.map((s) => LineTooltipItem("${s.x.toInt()}h: ${s.y.toStringAsFixed(3)} kWh", const TextStyle(color: Colors.indigoAccent, fontWeight: FontWeight.bold))).toList())) ))) ])); }
   Widget _tarjetaPerfilHorario() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.insights, size: 16, color: Colors.blueGrey), SizedBox(width: 8), Text("TUS PICOS DE CONSUMO (HORAS)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12))]), const Divider(), for (int i = 0; i < _topHoras.length; i++) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("${i+1}. Hora: ${_topHoras[i]['hora'].toString().padLeft(2,'0')}:00 - ${_topHoras[i]['hora']+1}:00", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)), Text("${_topHoras[i]['kwh'].toStringAsFixed(1)} kWh", style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))]))]));
   Widget _filaDesglose(String t, double c, bool b) => Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(t, style: TextStyle(fontWeight: b ? FontWeight.bold : FontWeight.normal)), Text("${c.toStringAsFixed(2)} €", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))]));
-  Widget _tarjetaPrediccion() { double totalEuros = ((_costeEnergia + _costePotencia) * _impuestoElectrico + _cuotaOctopus) * _iva; int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; int diasTotales = _cycleEnd.difference(_cycleStart).inDays + 1; double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; return Card(color: Colors.white, elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.indigo.shade200)), child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [const Icon(Icons.trending_up, color: Colors.indigo, size: 24), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text("PREDICCIÓN FIN DE CICLO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)), Text("${pred.toStringAsFixed(2)} €", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.indigo)),],),],)],),),); }
+  Widget _tarjetaPrediccion() { double totalEuros = ((_costeEnergia + _costePotencia) * _impuestoElectrico + _cuotaOctopus) * _iva; int diasRegistrados = _fetchEnd.difference(_cycleStart).inDays + 1; int diasTotales = _cycleEnd.difference(_cycleStart).inDays; double pred = diasRegistrados > 0 ? (totalEuros / diasRegistrados) * diasTotales : 0.0; return Card(color: Colors.white, elevation: 2, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.indigo.shade200)), child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Row(children: [const Icon(Icons.trending_up, color: Colors.indigo, size: 24), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text("PREDICCIÓN FIN DE CICLO", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)), Text("${pred.toStringAsFixed(2)} €", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.indigo)),],),],)],),),); }
   Widget _tarjetaInfoFlexi() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFFE0F7FA), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5)), borderRadius: BorderRadius.circular(20)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: const [Icon(Icons.ev_station, color: Colors.indigo, size: 20), SizedBox(width: 8), Text("Estrategia Leapmotor + Flexi", style: TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold, fontSize: 14))]), const SizedBox(height: 12), const Text("El sistema ahora evalúa tu histórico al milímetro. Recuerda: para llenar los 67.2kWh de tu Leapmotor al precio más barato, carga de 00:00 a 08:00 o los fines de semana.", style: TextStyle(fontSize: 12, color: Colors.black87)), const SizedBox(height: 8), const Text("ℹ️ El mercado OMIE subasta la luz a las 12:00h y los precios definitivos para el día siguiente se publican en E-SIOS a partir de las 20:30h.", style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.blueGrey)), const SizedBox(height: 16), SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _imprimirMasterPlanEV, icon: const Icon(Icons.print, color: Colors.white), label: const Text("IMPRIMIR MASTERPLAN", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, padding: const EdgeInsets.symmetric(vertical: 12))))]));
 }
