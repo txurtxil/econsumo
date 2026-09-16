@@ -1,4 +1,4 @@
-package com.example.rebuild_app
+package com.txurtxil.econsumo
 
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName

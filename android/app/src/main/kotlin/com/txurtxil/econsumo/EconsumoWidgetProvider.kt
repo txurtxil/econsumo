@@ -1,4 +1,4 @@
-package com.example.rebuild_app
+package com.txurtxil.econsumo
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -90,7 +90,7 @@ class EconsumoWidgetProvider : AppWidgetProvider() {
             val periodoColor = periodo.second
 
             val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-                ?: Intent().setClassName(context.packageName, "com.example.rebuild_app.MainActivity")
+                ?: Intent().setClassName(context.packageName, "com.txurtxil.econsumo.MainActivity")
             launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
 
             for (id in appWidgetIds) {
