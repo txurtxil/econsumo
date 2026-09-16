@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -10,7 +11,11 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.6.0';
+const String kAppVersion = '38.7.0';
+
+// Credenciales de Datadis en almacenamiento seguro (Keystore de Android).
+// Antes iban en SharedPreferences en texto plano (pendiente de seguridad nº1).
+const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -39,7 +44,7 @@ void callbackDispatcher() {
 
     if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
         // Sincronización en 2º plano vía API oficial de Datadis (sin scraping).
-        final String nif = prefs.getString('email') ?? ''; final String pass = prefs.getString('pass') ?? '';
+        final String nif = await _secureStorage.read(key: 'email') ?? ''; final String pass = await _secureStorage.read(key: 'pass') ?? '';
         if (nif.isEmpty || pass.isEmpty) return Future.value(true);
         DIA_CORTE_OCTOPUS = prefs.getInt('dia_corte') ?? 24;
         bool success = false; String errorMsg = '';
@@ -142,7 +147,19 @@ void main() async {
   // saturar la API de Datadis y cualquier riesgo de bloqueo por accesos automáticos).
   Workmanager().cancelAll();
   final prefs = await SharedPreferences.getInstance();
-  runApp(MaterialApp(debugShowCheckedModeBanner: false, theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF00E5FF)), home: MainOrchestrator(savedEmail: prefs.getString('email') ?? '', savedPass: prefs.getString('pass') ?? '')));
+  // Migración única: si el NIF/contraseña siguen en SharedPreferences (texto
+  // plano), se mueven al almacenamiento seguro y se borran de ahí.
+  final migEmail = prefs.getString('email');
+  final migPass = prefs.getString('pass');
+  if (migEmail != null || migPass != null) {
+    if (migEmail != null) await _secureStorage.write(key: 'email', value: migEmail);
+    if (migPass != null) await _secureStorage.write(key: 'pass', value: migPass);
+    await prefs.remove('email');
+    await prefs.remove('pass');
+  }
+  final savedEmail = await _secureStorage.read(key: 'email') ?? '';
+  final savedPass = await _secureStorage.read(key: 'pass') ?? '';
+  runApp(MaterialApp(debugShowCheckedModeBanner: false, theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF00E5FF)), home: MainOrchestrator(savedEmail: savedEmail, savedPass: savedPass)));
 }
 
 class MainOrchestrator extends StatefulWidget {
@@ -219,7 +236,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Scraping i-DE eliminado del código.");
+    _addLog("eConsumo v$kAppVersion. Credenciales en almacenamiento seguro.");
     // Sin sincronización automática: el usuario decide cuándo conectar
     // (botón o tirar para refrescar). WorkManager está cancelado al arrancar.
   }
@@ -738,7 +755,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     ));
   }
 
-  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await prefs.remove('email'); await prefs.remove('pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas (la caché de consumos se conserva)."); }
+  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await _secureStorage.delete(key: 'email'); await _secureStorage.delete(key: 'pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas (la caché de consumos se conserva)."); }
   String _formatDate(DateTime d) => "${d.day.toString().padLeft(2,'0')}-${d.month.toString().padLeft(2,'0')}-${d.year}";
   String _formatDateShort(DateTime d) => "${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}";
 
@@ -1319,7 +1336,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     );
   }
 
-  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass);  return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _status = "Conectando..."; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
+  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass);  return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { await _secureStorage.write(key: 'email', value: eCtrl.text.trim().toUpperCase()); await _secureStorage.write(key: 'pass', value: pCtrl.text); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _status = "Conectando..."; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
   Widget _tarjetaDesglose() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("TICKET DE COMPRA", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const Divider(), _filaDesglose("Energía Consumida", _costeEnergia, true), Padding(padding: const EdgeInsets.only(left: 16, bottom: 8), child: Row(children: [Text("${_kwhTotal.toStringAsFixed(1)} kWh procesados", style: const TextStyle(color: Colors.grey, fontSize: 11))])), _filaDesglose("Potencia Fija", _costePotencia, false), _filaDesglose("Gestión y Extras", _cuotaOctopus, false), const Divider(), _filaDesglose("Impuestos (IVA + IE)", ((_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva) - (_costeEnergia + _costePotencia + _cuotaOctopus), false)]));
   // --- WIDGETS RESTANTES DE LA INTERFAZ ---
   Widget _tarjetaLogsAparatos() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Column(children: [Padding(padding: const EdgeInsets.all(12), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ const Text("HISTORIAL APARATOS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), Row(children: [ IconButton(icon: const Icon(Icons.download, size: 18, color: Colors.blueGrey), onPressed: _importarDatos, tooltip: "Importar JSON"), IconButton(icon: const Icon(Icons.upload, size: 18, color: Colors.blueGrey), onPressed: _exportarDatos, tooltip: "Exportar JSON"), ],) ])), const Divider(height: 1), Container(height: 150, child: _logsDispositivos.isEmpty ? const Center(child: Text("No hay registros.", style: TextStyle(color: Colors.grey))) : ListView.separated(itemCount: _logsDispositivos.length, separatorBuilder: (c, i) => const Divider(height: 1), itemBuilder: (c, i) { final log = _logsDispositivos[i]; final start = DateTime.parse(log['start']); return ListTile(leading: const Icon(Icons.history, color: Colors.blueGrey), title: Text(log['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text("${start.day}/${start.month} - ${start.hour.toString().padLeft(2,'0')}:${start.minute.toString().padLeft(2,'0')}"), trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18), onPressed: () { setState(() { _logsDispositivos.removeAt(i); }); _saveDeviceLogs(); }),); },),),]));
