@@ -3,24 +3,19 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:workmanager/workmanager.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.9.0';
+const String kAppVersion = '39.0.0';
 
 // Credenciales de Datadis en almacenamiento seguro (Keystore de Android).
 // Antes iban en SharedPreferences en texto plano (pendiente de seguridad nº1).
 const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
 
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-
-// RESTAURAMOS EL DÍA DE CORTE AL 24 TRAS EL CAMBIO DE POTENCIA DEFINITIVO
-int DIA_CORTE_OCTOPUS = 24; // Configurable desde la app (guardado en prefs como 'dia_corte')
+// Día de inicio del ciclo de facturación (Octopus: lecturas del 15 al 14).
+int DIA_CORTE_OCTOPUS = 15; // Configurable desde la app (guardado en prefs como 'dia_corte')
 
 bool _esFestivoNacional(DateTime d) {
   final festivos = {
@@ -28,124 +23,17 @@ bool _esFestivoNacional(DateTime d) {
     "2024-10-12", "2024-11-01", "2024-12-06", "2024-12-08", "2024-12-25",
     "2025-01-01", "2025-01-06", "2025-04-18", "2025-05-01", "2025-08-15",
     "2025-10-12", "2025-11-01", "2025-12-06", "2025-12-08", "2025-12-25",
+    "2026-01-01", "2026-01-06", "2026-04-03", "2026-05-01", "2026-08-15",
+    "2026-10-12", "2026-11-01", "2026-12-06", "2026-12-08", "2026-12-25",
   };
   String k = "${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}";
   return festivos.contains(k);
 }
 
-@pragma('vm:entry-point')
-void callbackDispatcher() {
-  Workmanager().executeTask((task, inputData) async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    const AndroidInitializationSettings initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
-    await flutterLocalNotificationsPlugin.initialize(const InitializationSettings(android: initAndroid));
-
-
-    if (task == "fetchConsumoTask" || task == "econsumo_sync_diario" || task == "retry_sync_diario") {
-        // Sincronización en 2º plano vía API oficial de Datadis (sin scraping).
-        final String nif = await _secureStorage.read(key: 'email') ?? ''; final String pass = await _secureStorage.read(key: 'pass') ?? '';
-        if (nif.isEmpty || pass.isEmpty) return Future.value(true);
-        DIA_CORTE_OCTOPUS = prefs.getInt('dia_corte') ?? 24;
-        bool success = false; String errorMsg = '';
-        try {
-          final rTok = await http.post(Uri.parse('https://datadis.es/nikola-auth/tokens/login'),
-              headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-              body: {'username': nif, 'password': pass}).timeout(const Duration(seconds: 30));
-          if (rTok.statusCode != 200 || rTok.body.trim().isEmpty) {
-            errorMsg = 'Login Datadis HTTP ${rTok.statusCode}';
-          } else {
-            final token = rTok.body.trim();
-            final rSup = await http.get(Uri.parse('https://datadis.es/api-private/api/get-supplies'),
-                headers: {'Authorization': 'Bearer $token', 'Accept': 'application/json'}).timeout(const Duration(seconds: 60));
-            if (rSup.statusCode != 200) {
-              errorMsg = 'get-supplies HTTP ${rSup.statusCode}';
-            } else {
-              final List sup = jsonDecode(utf8.decode(rSup.bodyBytes));
-              if (sup.isEmpty) {
-                errorMsg = 'Sin suministros';
-              } else {
-                final String cups = sup.first['cups'].toString();
-                final String dist = sup.first['distributorCode'].toString();
-                final String pt = (sup.first['pointType'] ?? 5).toString();
-                DateTime now = DateTime.now(); DateTime startC;
-                if (now.day >= DIA_CORTE_OCTOPUS) { startC = DateTime(now.year, now.month, DIA_CORTE_OCTOPUS); } else { startC = DateTime(now.year, now.month - 1, DIA_CORTE_OCTOPUS); }
-                DateTime endC = now.subtract(const Duration(days: 1)); if (endC.isBefore(startC)) endC = startC;
-                final Set<String> meses = {};
-                for (DateTime c = startC; !c.isAfter(endC); c = c.add(const Duration(days: 1))) { meses.add("${c.year}/${c.month.toString().padLeft(2, '0')}"); }
-                double kwh = 0.0; Map<String, double> kwhDia = {}; DateTime? ultimo;
-                for (final m in meses) {
-                  final url = 'https://datadis.es/api-private/api/get-consumption-data?cups=$cups&distributorCode=$dist&startDate=$m&endDate=$m&measurementType=0&pointType=$pt';
-                  final rc = await http.get(Uri.parse(url), headers: {'Authorization': 'Bearer $token', 'Accept': 'application/json'}).timeout(const Duration(seconds: 90));
-                  if (rc.statusCode != 200) { errorMsg = 'consumo $m HTTP ${rc.statusCode}'; continue; }
-                  for (final e in (jsonDecode(utf8.decode(rc.bodyBytes)) as List)) {
-                    try {
-                      final f = e['date'].toString().replaceAll('-', '/'); final pz = f.split('/');
-                      final dt = DateTime(int.parse(pz[0]), int.parse(pz[1]), int.parse(pz[2]));
-                      if (dt.isBefore(startC) || dt.isAfter(endC)) continue;
-                      final c = double.tryParse(e['consumptionKWh'].toString()) ?? 0.0;
-                      kwh += c; kwhDia[f] = (kwhDia[f] ?? 0) + c;
-                      if (c > 0 && (ultimo == null || dt.isAfter(ultimo))) ultimo = dt;
-                    } catch (_) {}
-                  }
-                }
-                if (kwh > 0) {
-                  if (ultimo != null) endC = ultimo;
-                  int dias = endC.difference(startC).inDays + 1; if (dias <= 0) dias = 1;
-                  // Tarifa Octopus Relax: precio único 24h
-                  double coste = kwh * 0.103;
-                  double costeFijoPotencia = (4.4 + 5.7) * 0.093 * dias;
-                  double costeFijoExtra = (0.024667 + 0.026667) * dias;
-                  double total = ((coste + costeFijoPotencia) * 1.05113 + costeFijoExtra) * 1.21;
-                  DateTime finCiclo = DateTime(startC.year, startC.month + 1, DIA_CORTE_OCTOPUS).subtract(const Duration(days: 1));
-                  int diasTotales = finCiclo.difference(startC).inDays + 1;
-                  double pred = (total / dias) * diasTotales;
-                  final claves = kwhDia.keys.toList()..sort();
-                  final ult7 = claves.length > 7 ? claves.sublist(claves.length - 7) : claves;
-                  final grafica = ult7.map((k) { final pz = k.split('/'); return "${pz[2]}/${pz[1]}|${kwhDia[k]!.toStringAsFixed(2)}"; }).join(";");
-                  await flutterLocalNotificationsPlugin.show(0, "Ciclo: ${total.toStringAsFixed(2)} €", "${kwh.toStringAsFixed(1)} kWh · Predicción ${pred.toStringAsFixed(2)} €",
-                      const NotificationDetails(android: AndroidNotificationDetails('econsumo_ch', 'eConsumo', importance: Importance.low, priority: Priority.low)));
-                  try {
-                    const MethodChannel channel = MethodChannel('widget_channel');
-                    await channel.invokeMethod('updateWidget', {
-                      'fechas': "${startC.day.toString().padLeft(2, '0')}/${startC.month.toString().padLeft(2, '0')} al ${endC.day.toString().padLeft(2, '0')}/${endC.month.toString().padLeft(2, '0')}",
-                      'euros': "${total.toStringAsFixed(2)} €",
-                      'kwh': "${kwh.toStringAsFixed(1)} kWh",
-                      'prediccion': "Predicción: ${pred.toStringAsFixed(2)} €",
-                      'consejo': '', 'grafica': grafica,
-                    });
-                  } catch (_) {}
-                  success = true;
-                } else if (errorMsg.isEmpty) {
-                  errorMsg = 'Datadis devolvió 0 kWh para el ciclo';
-                }
-              }
-            }
-          }
-        } catch (e) { errorMsg = 'Excepción: $e'; }
-
-        if (success) {
-          await prefs.setString('last_sync_ts', DateTime.now().toIso8601String());
-          await prefs.remove('last_sync_error');
-        } else {
-          if (errorMsg.isEmpty) errorMsg = 'Fallo desconocido en sync Datadis';
-          await prefs.setString('last_sync_error', '${DateTime.now().toIso8601String()}|$errorMsg');
-          // Sin reintento automático: el usuario reconecta a mano cuando quiera.
-        }
-        return Future.value(success);
-    }
-    return Future.value(true);
-  });
-}
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  const AndroidInitializationSettings initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
-  await flutterLocalNotificationsPlugin.initialize(const InitializationSettings(android: initAndroid));
-  Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
-  // Sin sincronización automática: el usuario decide cuándo conectar (evita
-  // saturar la API de Datadis y cualquier riesgo de bloqueo por accesos automáticos).
-  Workmanager().cancelAll();
+  // Sin sincronización automática (decisión del usuario): no hay WorkManager.
+  // El usuario pulsa "CONECTAR Y ACTUALIZAR" cuando quiere.
   final prefs = await SharedPreferences.getInstance();
   // Migración única: si el NIF/contraseña siguen en SharedPreferences (texto
   // plano), se mueven al almacenamiento seguro y se borran de ahí.
@@ -237,9 +125,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   void initState() {
     super.initState();
     _email = widget.savedEmail; _pass = widget.savedPass;
-    _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
+    _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Ciclo ajustado a lecturas de contador (30 días).");
+    _addLog("eConsumo v$kAppVersion. Limpieza pre-Play: sin workmanager, festivos 2026.");
     // Sin sincronización automática: el usuario decide cuándo conectar
     // (botón o tirar para refrescar). WorkManager está cancelado al arrancar.
   }
@@ -259,11 +147,11 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
         'Accept': 'application/json',
       };
 
-  // Periodos 2.0TD: 1=punta, 2=llano, 3=valle. (Festivos nacionales
-  // no contemplados: cuentan como laborable. Con Relax el precio es
-  // plano, así que esto es solo estadística.)
+  // Periodos 2.0TD: 1=punta, 2=llano, 3=valle. Fines de semana y festivos
+  // nacionales: todo valle. (Autonómicos/locales no incluidos: con Relax el
+  // precio es plano y esto es solo estadística y comparador.)
   int _periodoTarifario(DateTime d, int h) {
-    if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) return 3;
+    if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday || _esFestivoNacional(d)) return 3;
     if ((h >= 10 && h < 14) || (h >= 18 && h < 22)) return 1;
     if ((h >= 8 && h < 10) || (h >= 14 && h < 18) || h >= 22) return 2;
     return 3;
@@ -720,15 +608,6 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     }
   }
 
-  Future<void> _solicitarPermisosNativos() async {
-    PermissionStatus status = await Permission.notification.status;
-    if (!status.isGranted) await Permission.notification.request();
-    // Clave: sin esto, MIUI/Samsung/Huawei matan el WorkManager en 2º plano
-    // y el consumo deja de actualizarse solo. Requiere el permiso
-    // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS en AndroidManifest.xml.
-    PermissionStatus battery = await Permission.ignoreBatteryOptimizations.status;
-    if (!battery.isGranted) await Permission.ignoreBatteryOptimizations.request();
-  }
   void _addLog(String msg) { if (!mounted) return; setState(() { _logs.add("[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $msg"); if (_logs.length > 50) _logs.removeAt(0); }); Future.delayed(const Duration(milliseconds: 100), () { if (_logScrollController.hasClients) _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent); }); }
   void _copiarLog() { Clipboard.setData(ClipboardData(text: _logs.join('\n'))); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Terminal copiada'))); }
   void _mostrarAcercaDe() {
@@ -762,7 +641,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     ));
   }
 
-  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await _secureStorage.delete(key: 'email'); await _secureStorage.delete(key: 'pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); Workmanager().cancelAll(); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas (la caché de consumos se conserva)."); }
+  void _cerrarSesion() async { final prefs = await SharedPreferences.getInstance(); await _secureStorage.delete(key: 'email'); await _secureStorage.delete(key: 'pass'); await prefs.remove('last_sync_ts'); await prefs.remove('last_sync_error'); setState(() { _email = ''; _pass = ''; _isLoggedIn = false; _conectando = false; _datadisCups = ''; _datadisDistCode = ''; _kwhTotal = 0.0; _costeEnergia = 0.0; _desgloseDiario.clear(); _horasPorDia.clear(); }); _addLog("Sesión cerrada. Credenciales borradas (la caché de consumos se conserva)."); }
   String _formatDate(DateTime d) => "${d.day.toString().padLeft(2,'0')}-${d.month.toString().padLeft(2,'0')}-${d.year}";
   String _formatDateShort(DateTime d) => "${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}";
 
@@ -826,7 +705,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
   void _procesarCurvasHorarias(List<dynamic> horas) {
     if (horas.isEmpty) {
-        _addLog("I-DE: Sin datos horarios.");
+        _addLog("Datadis: sin datos horarios para este ciclo.");
         if (mounted) setState(() => _status = "Sin datos aún");
         return;
     }
@@ -1142,7 +1021,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                     _tarjetaCNMC(), const SizedBox(height: 16),
 
                     
-                    // AVISO INTELIGENTE SI I-DE ESTÁ RETRASADO
+                    // AVISO SI DATADIS AÚN NO HA PUBLICADO DATOS
                     if (_desgloseDiario.isEmpty && !_status.contains("Calculando") && !_status.contains("bóveda")) 
                       Container(
                           margin: const EdgeInsets.symmetric(vertical: 10),
@@ -1152,7 +1031,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
                               children: const [
                                   Icon(Icons.pending_actions, color: Colors.orange, size: 40),
                                   SizedBox(height: 8),
-                                  Text("Iberdrola no ha procesado datos para estos días.", textAlign: TextAlign.center, style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold)),
+                                  Text("Datadis aún no ha publicado datos para estos días.", textAlign: TextAlign.center, style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold)),
                                   SizedBox(height: 4),
                                   Text("Despliega el menú superior 'CICLO ACTUAL' para acceder a la Bóveda Histórica y consultar tus meses pasados.", textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Colors.black54)),
                               ]
