@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -8,11 +7,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:workmanager/workmanager.dart';
 import 'package:http/http.dart' as http;
-import 'package:html/parser.dart' show parse;
 import 'dart:convert';
 import 'dart:async';
 
-const String kAppVersion = '38.5.0';
+const String kAppVersion = '38.6.0';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -156,8 +154,7 @@ class MainOrchestrator extends StatefulWidget {
 
 class _MainOrchestratorState extends State<MainOrchestrator> {
   late String _email; late String _pass;
-  InAppWebViewController? _webController;
-  bool _isLoggedIn = false; bool _showWebFallback = false;
+  bool _isLoggedIn = false;
   String _status = "Calculando Ciclo..."; 
   
   double _kwhTotal = 0.0; double _kwhValle = 0.0; double _kwhLlano = 0.0; double _kwhPunta = 0.0;
@@ -208,7 +205,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   List<Map<String, dynamic>> _logsDispositivos = [];
 
 
-  final List<String> _logs = []; final ScrollController _logScrollController = ScrollController(); Timer? _rescueTimer;
+  final List<String> _logs = []; final ScrollController _logScrollController = ScrollController();
 
   DateTime? _lastSyncTime; String? _lastSyncError; Timer? _autoRefreshTimer;
   DateTime? _proximaDescargaMes; // hora a la que el mes en curso volverá a poder descargarse (últ. descarga + 24h)
@@ -222,10 +219,9 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     _email = widget.savedEmail; _pass = widget.savedPass;
     _solicitarPermisosNativos(); _loadDeviceLogs(); _calcularFechasCiclo(); _cargarEstadoSincronizacion(); _cargarTarifaGuardada();
     
-    _addLog("eConsumo v$kAppVersion. Fix meses cerrados incompletos.");
-    // Nota: la conexión a i-DE ya NO arranca sola al abrir la app.
-    // El usuario decide cuándo conectar (botón o tirar para refrescar).
-    // La sincronización en 2º plano (WorkManager cada 12h) sigue activa.
+    _addLog("eConsumo v$kAppVersion. Scraping i-DE eliminado del código.");
+    // Sin sincronización automática: el usuario decide cuándo conectar
+    // (botón o tirar para refrescar). WorkManager está cancelado al arrancar.
   }
 
   // ============================================================
@@ -603,7 +599,6 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
   @override
   void dispose() {
     _autoRefreshTimer?.cancel();
-    _rescueTimer?.cancel();
     _logScrollController.dispose();
     _deviceCtrl.dispose();
     super.dispose();
@@ -802,20 +797,6 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       } catch (e) { grafica = ''; }
 
       try { await const MethodChannel('widget_channel').invokeMethod('updateWidget', { 'fechas': '${_formatDateShort(_cycleStart)} al ${_formatDateShort(_fetchEnd)}', 'euros': '${totalEuros.toStringAsFixed(2)} €', 'kwh': '${_kwhTotal.toStringAsFixed(1)} kWh', 'prediccion': 'Predicción: ${pred.toStringAsFixed(2)} €', 'consejo': textoWidget, 'grafica': grafica }); } catch (e) {} 
-  }
-
-  void _comprobarAccesoExitoso(String path) { 
-    if (!path.contains('login') && !path.contains('logout') && path.length > 5) { 
-        _rescueTimer?.cancel(); 
-        if (!_isLoggedIn) { 
-            setState(() { 
-                _isLoggedIn = true; 
-                _status = "Calculando..."; 
-                _showWebFallback = false; 
-            }); 
-            _actualizarDatos(); 
-        } 
-    } 
   }
 
 
@@ -1116,11 +1097,10 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
       body: Column(
         children: [
           Expanded(
-            child: Stack(
-              children: [
-                Offstage(offstage: !_showWebFallback, child: InAppWebView(initialUrlRequest: URLRequest(url: WebUri('about:blank')), initialSettings: InAppWebViewSettings(userAgent: 'Mozilla/5.0 (Linux; Android 13)', javaScriptEnabled: true, domStorageEnabled: true), onWebViewCreated: (c) { _webController = c; c.addJavaScriptHandler(handlerName: 'appLog', callback: (a) => _addLog(a[0].toString())); c.addJavaScriptHandler(handlerName: 'spaNav', callback: (a) => _comprobarAccesoExitoso(a[0].toString())); c.addJavaScriptHandler(handlerName: 'consumosIberdrola', callback: (a) => _procesarCurvasHorarias(a[0])); }, onUpdateVisitedHistory: (c, url, r) => _comprobarAccesoExitoso(url?.path ?? ''), onLoadStop: (c, url) async { if ((url?.path ?? '').contains('login') && _email.isNotEmpty && !_isLoggedIn) { setState(() => _status = "Autenticando..."); _rescueTimer = Timer(const Duration(seconds: 15), () { if (!_isLoggedIn && mounted) setState(() => _showWebFallback = true); }); await c.evaluateJavascript(source: "setInterval(() => { let cp = window.location.pathname; if (window._lp !== cp) { window._lp = cp; window.flutter_inappwebview.callHandler('spaNav', cp); } }, 1000); async function autoLogin(e,p,a){ let btn=Array.from(document.querySelectorAll('button')).find(b=>b.innerText&&b.innerText.toLowerCase().includes('entrar')); let em=document.querySelector('input[type=\"email\"]')||document.querySelector('input[name=\"email\"]'); let pw=document.querySelector('input[type=\"password\"]'); if(em&&pw&&btn){ const ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,\"value\").set; em.focus();ns.call(em,e);em.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,400)); pw.focus();ns.call(pw,p);pw.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,600)); btn.click(); } else if(a>0) setTimeout(()=>autoLogin(e,p,a-1),1500); } autoLogin('$_email','$_pass',6);"); } })),
-                if (!_showWebFallback) ...[
-                  if (_email.isEmpty) _pantallaLoginNatva() else if (!_isLoggedIn && !_conectando) _pantallaConectar() else if (!_isLoggedIn) Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const CircularProgressIndicator(color: Color(0xFF00E5FF)), const SizedBox(height: 24), Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))])) else RefreshIndicator(onRefresh: _forzarRefrescoCompleto, color: const Color(0xFF00E5FF), child: ListView(padding: const EdgeInsets.all(16), children: [ 
+            child: _email.isEmpty ? _pantallaLoginNatva()
+                : (!_isLoggedIn && !_conectando) ? _pantallaConectar()
+                : (!_isLoggedIn) ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const CircularProgressIndicator(color: Color(0xFF00E5FF)), const SizedBox(height: 24), Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))]))
+                : RefreshIndicator(onRefresh: _forzarRefrescoCompleto, color: const Color(0xFF00E5FF), child: ListView(padding: const EdgeInsets.all(16), children: [ 
                     
                     _bannerEstadoSync(), const SizedBox(height: 12),
                     _tarjetaDinero(), const SizedBox(height: 16),
@@ -1166,10 +1146,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
 
                     const Text("  HERRAMIENTAS DE ANÁLISIS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12, letterSpacing: 1.2)), const SizedBox(height: 8),
                     _tarjetaLogsAparatos(), const SizedBox(height: 16),
-                  ]))
-                ]
-              ],
-            ),
+                  ])),
           ),
           Container(height: 120, width: double.infinity, color: Colors.black, padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("> TERMINAL SNIFFER", style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.copy, color: Colors.white, size: 20), onPressed: _copiarLog)]), Expanded(child: ListView.builder(controller: _logScrollController, itemCount: _logs.length, itemBuilder: (c, i) => Text(_logs[i], style: TextStyle(color: _logs[i].contains("Error") || _logs[i].contains("Fallo") || _logs[i].contains("WU1") ? Colors.redAccent : Colors.white70, fontSize: 10, fontFamily: 'monospace'))))]))
         ],
@@ -1342,7 +1319,7 @@ class _MainOrchestratorState extends State<MainOrchestrator> {
     );
   }
 
-  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass);  return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _status = "Conectando..."; _showWebFallback = false; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
+  Widget _pantallaLoginNatva() { final eCtrl = TextEditingController(text: _email); final pCtrl = TextEditingController(text: _pass);  return Center(child: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(24.0), child: Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), child: Padding(padding: const EdgeInsets.all(24.0), child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.electric_car, size: 60, color: Color(0xFF00E5FF)), const SizedBox(height: 16), const Text("eConsumo EV Connect", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("Datos vía Datadis (API oficial de las distribuidoras)", style: TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center), const SizedBox(height: 24), TextField(controller: eCtrl, decoration: const InputDecoration(labelText: "NIF (usuario Datadis)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.badge))), const SizedBox(height: 16), TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Contraseña de Datadis", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))), const SizedBox(height: 24), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('email', eCtrl.text.trim()); await prefs.setString('pass', pCtrl.text); setState(() { _email = eCtrl.text.trim().toUpperCase(); _pass = pCtrl.text; _status = "Conectando..."; }); _conectarAhora(); }, style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00E5FF), foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text("CONECTAR", style: TextStyle(fontWeight: FontWeight.bold))))])))))); }
   Widget _tarjetaDesglose() => Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("TICKET DE COMPRA", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), const Divider(), _filaDesglose("Energía Consumida", _costeEnergia, true), Padding(padding: const EdgeInsets.only(left: 16, bottom: 8), child: Row(children: [Text("${_kwhTotal.toStringAsFixed(1)} kWh procesados", style: const TextStyle(color: Colors.grey, fontSize: 11))])), _filaDesglose("Potencia Fija", _costePotencia, false), _filaDesglose("Gestión y Extras", _cuotaOctopus, false), const Divider(), _filaDesglose("Impuestos (IVA + IE)", ((_costeEnergia + _costePotencia + _cuotaOctopus) * _impuestoElectrico * _iva) - (_costeEnergia + _costePotencia + _cuotaOctopus), false)]));
   // --- WIDGETS RESTANTES DE LA INTERFAZ ---
   Widget _tarjetaLogsAparatos() => Card(elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: Colors.grey.shade300)), color: Colors.white, child: Column(children: [Padding(padding: const EdgeInsets.all(12), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ const Text("HISTORIAL APARATOS", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12)), Row(children: [ IconButton(icon: const Icon(Icons.download, size: 18, color: Colors.blueGrey), onPressed: _importarDatos, tooltip: "Importar JSON"), IconButton(icon: const Icon(Icons.upload, size: 18, color: Colors.blueGrey), onPressed: _exportarDatos, tooltip: "Exportar JSON"), ],) ])), const Divider(height: 1), Container(height: 150, child: _logsDispositivos.isEmpty ? const Center(child: Text("No hay registros.", style: TextStyle(color: Colors.grey))) : ListView.separated(itemCount: _logsDispositivos.length, separatorBuilder: (c, i) => const Divider(height: 1), itemBuilder: (c, i) { final log = _logsDispositivos[i]; final start = DateTime.parse(log['start']); return ListTile(leading: const Icon(Icons.history, color: Colors.blueGrey), title: Text(log['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text("${start.day}/${start.month} - ${start.hour.toString().padLeft(2,'0')}:${start.minute.toString().padLeft(2,'0')}"), trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18), onPressed: () { setState(() { _logsDispositivos.removeAt(i); }); _saveDeviceLogs(); }),); },),),]));
